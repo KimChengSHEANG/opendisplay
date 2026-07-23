@@ -258,19 +258,27 @@ final class PhoneReceiver: ObservableObject {
     /// The device locked — nobody can see the stream, so tell the Mac and go
     /// silent. Sends "sleeping" (the Mac drops its virtual display so the
     /// cursor isn't stranded on an invisible screen and arms a reconnect),
-    /// then closes the connection AND the listener: while asleep we must not
-    /// accept connections, or the Mac's wake retries would rebuild the
-    /// display before anyone can see it. ensureListening() re-arms
-    /// everything when the scene becomes active again.
+    /// then closes the connection and (unless `keepListening`) the listener
+    /// too: while locked we must not accept connections, or the Mac's wake
+    /// retries would rebuild the display before anyone can see it.
+    /// `ensureListening()` re-arms everything when the scene becomes active
+    /// again.
     /// `announceToMac: false` is for sleep the Mac itself already knows
     /// about (its display went to sleep/locked) — it owns the reconnect, so
     /// echoing "sleeping" back would be redundant. Local lock paths keep
     /// the default `true`: the Mac has no other way to learn about those.
+    /// `keepListening: true` is for host-initiated sleep only: the Mac owns
+    /// the reconnect and may dial back in at any moment while we're still
+    /// foregrounded, so the listener must stay armed (or be re-armed right
+    /// away) instead of waiting for the next scene-active cycle. Local lock
+    /// keeps the default `false` — nobody can see the display anyway, so the
+    /// listener comes down until `ensureListening()` re-arms it on unlock.
     func enterSleep(announceToMac: Bool = true,
+                    keepListening: Bool = false,
                     status: String = "Asleep — resumes on wake",
                     completion: (() -> Void)? = nil) {
         closeSession(announcing: announceToMac ? WireMessage.sleeping : nil,
-                     status: status, completion: completion)
+                     status: status, keepListening: keepListening, completion: completion)
     }
 
     /// The app is being terminated (user swiped it away). Same close, but
@@ -278,15 +286,17 @@ final class PhoneReceiver: ObservableObject {
     /// ends the session without waiting around for a wake.
     func shutDown(completion: (() -> Void)? = nil) {
         closeSession(announcing: WireMessage.closing,
-                     status: "Closed", completion: completion)
+                     status: "Closed", keepListening: false, completion: completion)
     }
 
     /// `type: nil` tears the session down silently — no send, just local
     /// cleanup — for cases like host-initiated sleep where the peer already
     /// knows and an echo back would be redundant (or arrive after it's torn
     /// its own side down already).
+    /// `keepListening: true` cancels the connection but leaves the listener
+    /// (and `listenerHealthy`) alone — see `enterSleep`.
     private func closeSession(announcing type: String?, status: String,
-                              completion: (() -> Void)?) {
+                              keepListening: Bool, completion: (() -> Void)?) {
         queue.async {
             var finished = false
             let finish = { [weak self] in
@@ -294,9 +304,11 @@ final class PhoneReceiver: ObservableObject {
                 finished = true
                 self.connection?.cancel()
                 self.connection = nil
-                self.listener?.cancel()
-                self.listener = nil
-                self.listenerHealthy = false
+                if !keepListening {
+                    self.listener?.cancel()
+                    self.listener = nil
+                    self.listenerHealthy = false
+                }
                 self.setConnected(false)
                 self.setStatus(status)
                 completion?()
@@ -463,8 +475,9 @@ final class PhoneReceiver: ObservableObject {
             // Mac display asleep or locked — same teardown as a local lock,
             // but do not announce sleeping back: the Mac already owns the
             // reconnect and knows its own state.
-            Log.info("Mac host sleeping — entering sleep (no announce)")
-            enterSleep(announceToMac: false, status: "Mac asleep — resumes when Mac wakes")
+            Log.info("Mac host sleeping — entering sleep (no announce, keep listening)")
+            enterSleep(announceToMac: false, keepListening: true,
+                       status: "Mac asleep — resumes when Mac wakes")
         default:
             break
         }
