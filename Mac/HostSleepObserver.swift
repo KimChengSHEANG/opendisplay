@@ -43,10 +43,21 @@ final class HostSleepObserver {
         DistributedNotificationCenter.default().removeObserver(self)
     }
 
-    @objc private func screensDidSleep() { setScreensAsleep(true) }
-    @objc private func screensDidWake() { setScreensAsleep(false) }
-    @objc private func screenIsLocked() { setScreenLocked(true) }
-    @objc private func screenIsUnlocked() { setScreenLocked(false) }
+    @objc private func screensDidSleep() {
+        Task { @MainActor [weak self] in self?.setScreensAsleep(true) }
+    }
+
+    @objc private func screensDidWake() {
+        Task { @MainActor [weak self] in self?.setScreensAsleep(false) }
+    }
+
+    @objc private func screenIsLocked() {
+        Task { @MainActor [weak self] in self?.setScreenLocked(true) }
+    }
+
+    @objc private func screenIsUnlocked() {
+        Task { @MainActor [weak self] in self?.setScreenLocked(false) }
+    }
 
     private func setScreensAsleep(_ value: Bool) {
         guard screensAsleep != value else { return }
