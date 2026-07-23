@@ -569,6 +569,34 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// Tell the phone the Mac is going dormant, then call `completion` on the
+    /// main actor so the controller can tear the session down. Best-effort: if
+    /// there is no live link, complete immediately.
+    func announceHostSleeping(completion: @escaping () -> Void) {
+        queue.async { [weak self] in
+            guard let self else {
+                DispatchQueue.main.async { completion() }
+                return
+            }
+            guard let connection = self.connection, self.connectionReady else {
+                DispatchQueue.main.async { completion() }
+                return
+            }
+            let payload = Data("{\"type\":\"\(WireMessage.hostSleeping)\"}".utf8)
+            var header = UInt32(payload.count).bigEndian
+            var frame = Data(bytes: &header, count: 4)
+            frame.append(payload)
+            var finished = false
+            let finish = {
+                guard !finished else { return }
+                finished = true
+                DispatchQueue.main.async { completion() }
+            }
+            connection.send(content: frame, completion: .contentProcessed { _ in finish() })
+            self.queue.asyncAfter(deadline: .now() + 1.0) { finish() }
+        }
+    }
+
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         Log.info("stream stopped with error: \(error)")
         Task { await status("Capture stopped: \(error.localizedDescription)") }
