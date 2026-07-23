@@ -262,9 +262,15 @@ final class PhoneReceiver: ObservableObject {
     /// accept connections, or the Mac's wake retries would rebuild the
     /// display before anyone can see it. ensureListening() re-arms
     /// everything when the scene becomes active again.
-    func enterSleep(completion: (() -> Void)? = nil) {
-        closeSession(announcing: WireMessage.sleeping,
-                     status: "Asleep — resumes on wake", completion: completion)
+    /// `announceToMac: false` is for sleep the Mac itself already knows
+    /// about (its display went to sleep/locked) — it owns the reconnect, so
+    /// echoing "sleeping" back would be redundant. Local lock paths keep
+    /// the default `true`: the Mac has no other way to learn about those.
+    func enterSleep(announceToMac: Bool = true,
+                    status: String = "Asleep — resumes on wake",
+                    completion: (() -> Void)? = nil) {
+        closeSession(announcing: announceToMac ? WireMessage.sleeping : nil,
+                     status: status, completion: completion)
     }
 
     /// The app is being terminated (user swiped it away). Same close, but
@@ -275,7 +281,11 @@ final class PhoneReceiver: ObservableObject {
                      status: "Closed", completion: completion)
     }
 
-    private func closeSession(announcing type: String, status: String,
+    /// `type: nil` tears the session down silently — no send, just local
+    /// cleanup — for cases like host-initiated sleep where the peer already
+    /// knows and an echo back would be redundant (or arrive after it's torn
+    /// its own side down already).
+    private func closeSession(announcing type: String?, status: String,
                               completion: (() -> Void)?) {
         queue.async {
             var finished = false
@@ -291,8 +301,9 @@ final class PhoneReceiver: ObservableObject {
                 self.setStatus(status)
                 completion?()
             }
-            guard let conn = self.connection, conn.state == .ready else {
-                Log.info("closing session (\(type)) — no live connection")
+            guard let type,
+                  let conn = self.connection, conn.state == .ready else {
+                Log.info("closing session (\(type ?? "silent")) — no announce or no live connection")
                 finish()
                 return
             }
@@ -448,6 +459,12 @@ final class PhoneReceiver: ObservableObject {
                 ?? "Update OpenDisplay from the App Store to keep using your second display."
             let store = (obj["store"] as? String).flatMap { URL(string: $0) } ?? AppStore.updateURL
             DispatchQueue.main.async { self.peerSignal = .updateIPhone(message: message, storeURL: store) }
+        case WireMessage.hostSleeping:
+            // Mac display asleep or locked — same teardown as a local lock,
+            // but do not announce sleeping back: the Mac already owns the
+            // reconnect and knows its own state.
+            Log.info("Mac host sleeping — entering sleep (no announce)")
+            enterSleep(announceToMac: false, status: "Mac asleep — resumes when Mac wakes")
         default:
             break
         }

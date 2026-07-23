@@ -243,14 +243,18 @@ struct ReceiverScreen: View {
             model.appWillTerminate()
         }
         .onValueChange(of: model.receiver.connected) { isConnected in
-            // The first valid connection retires the onboarding hint for good.
             if isConnected {
+                // The first valid connection retires the onboarding hint for good.
                 hasConnectedBefore = true
                 showOnboarding = false
+                UIApplication.shared.isIdleTimerDisabled = true
+            } else {
+                // Disconnected (including Mac asleep) — let the screen idle
+                // normally instead of keeping it awake for nothing.
+                UIApplication.shared.isIdleTimerDisabled = false
             }
         }
         .onAppear {
-            UIApplication.shared.isIdleTimerDisabled = true
             model.start()
             // Show the first-run hint unless the device has connected before
             // or the user already dismissed it.
