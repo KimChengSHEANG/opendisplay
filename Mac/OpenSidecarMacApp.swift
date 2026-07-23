@@ -381,10 +381,12 @@ final class SenderController: ObservableObject {
             if !pendingWakeTargets.contains(where: { $0.sessionID == target.sessionID }) {
                 pendingWakeTargets.append(target)
             }
-            session.sender.announceHostSleeping { [weak self] in
-                guard let self else { return }
-                // Session may already be gone if peer disconnected mid-announce.
-                if self.sessions.contains(where: { $0.id == session.id }) {
+            session.sender.announceHostSleeping { [weak self, weak session] in
+                guard let self, let session else { return }
+                // Session may already be gone if peer disconnected mid-announce,
+                // or replaced by a fresh reconnect if the host woke up first —
+                // only end it if it's still the exact same session object.
+                if let current = self.sessions.first(where: { $0.id == session.id }), current === session {
                     self.end(session)
                 }
             }
@@ -401,6 +403,13 @@ final class SenderController: ObservableObject {
         }
         Log.info("host usable — reconnecting \(targets.count) session(s)")
         for target in targets {
+            // If the announce-then-end from `hostBecameDormant` hasn't landed
+            // yet, the old session is still parked in `sessions` and would
+            // make `connect` no-op below — force-end it first.
+            if let lingering = session(for: target.sessionID) {
+                Log.info("host usable — ending lingering session \(lingering.id) before wake reconnect")
+                end(lingering)
+            }
             connect(to: refreshed(target), awaitingWake: true)
         }
     }
