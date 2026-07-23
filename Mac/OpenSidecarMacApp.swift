@@ -231,6 +231,13 @@ final class SenderController: ObservableObject {
     private var wifiAutoConnectArmed = false
     private let wifiAutoConnectDeadline = Date().addingTimeInterval(12)
 
+    // The Mac is asleep or locked: sessions are parked (announced + ended)
+    // rather than left to time out, and reconnecting is deferred until the
+    // host is usable again. Edge-driven by `hostSleepObserver`.
+    private var hostDormant = false
+    private var pendingWakeTargets: [ConnectionTarget] = []
+    private let hostSleepObserver = HostSleepObserver()
+
     init() {
         startBrowsing()
         usbWatcher = UsbmuxDeviceWatcher { [weak self] devices in
@@ -244,6 +251,18 @@ final class SenderController: ObservableObject {
             try? await Task.sleep(for: .seconds(2))
             self.wifiAutoConnectArmed = true
             self.autoConnect()
+        }
+
+        hostSleepObserver.onDormantChange = { [weak self] dormant in
+            guard let self else { return }
+            if dormant { self.hostBecameDormant() } else { self.hostBecameUsable() }
+        }
+        hostSleepObserver.start()
+        // If we launched already locked, treat as dormant with no sessions
+        // yet — `start()` only reports the initial state, it doesn't fire
+        // the edge-only callback for it.
+        if hostSleepObserver.isDormant {
+            hostDormant = true
         }
     }
 
@@ -317,6 +336,7 @@ final class SenderController: ObservableObject {
 
     private func autoConnect() {
         guard autoConnectEnabled else { return }
+        guard !hostDormant else { return }
         dedupeSessions()
         // The -host/-port escape hatch is an explicit choice — dial it like
         // the wired devices (it joins them, not replaces them).
@@ -342,6 +362,60 @@ final class SenderController: ObservableObject {
                !cabled(result) {
                 connect(to: target)
             }
+        }
+    }
+
+    // MARK: - Host dormancy (sleep/lock)
+
+    private func hostBecameDormant() {
+        hostDormant = true
+        let active = sessions
+        guard !active.isEmpty else {
+            Log.info("host dormant — no sessions to park")
+            return
+        }
+        Log.info("host dormant — parking \(active.count) session(s)")
+        // Snapshot targets before ending; announce then end each.
+        for session in active {
+            let target = session.target
+            if !pendingWakeTargets.contains(where: { $0.sessionID == target.sessionID }) {
+                pendingWakeTargets.append(target)
+            }
+            session.sender.announceHostSleeping { [weak self] in
+                guard let self else { return }
+                // Session may already be gone if peer disconnected mid-announce.
+                if self.sessions.contains(where: { $0.id == session.id }) {
+                    self.end(session)
+                }
+            }
+        }
+    }
+
+    private func hostBecameUsable() {
+        hostDormant = false
+        let targets = pendingWakeTargets
+        pendingWakeTargets.removeAll()
+        guard !targets.isEmpty else {
+            Log.info("host usable — nothing pending")
+            return
+        }
+        Log.info("host usable — reconnecting \(targets.count) session(s)")
+        for target in targets {
+            connect(to: refreshed(target), awaitingWake: true)
+        }
+    }
+
+    /// Prefer a live Bonjour result after a long sleep; USB targets are stable.
+    private func refreshed(_ target: ConnectionTarget) -> ConnectionTarget {
+        switch target {
+        case .usb:
+            return target
+        case .wifi:
+            let id = target.sessionID
+            if let fresh = discovered.first(where: { ConnectionTarget.wifi($0).sessionID == id }) {
+                return .wifi(fresh)
+            }
+            return target
         }
     }
 
@@ -465,6 +539,18 @@ final class SenderController: ObservableObject {
 
     func connect(to target: ConnectionTarget, userInitiated: Bool = false,
                  awaitingWake: Bool = false) {
+        // While the Mac is asleep/locked, don't start sessions — the display
+        // is invisible either way. `hostBecameUsable` clears the flag before
+        // calling back in, so genuine wake-reconnects still go through.
+        if hostDormant {
+            let id = target.sessionID
+            if !pendingWakeTargets.contains(where: { $0.sessionID == id }) {
+                pendingWakeTargets.append(target)
+            }
+            Log.info("connect(\(id)) deferred — host dormant")
+            return
+        }
+
         let id = target.sessionID
         guard session(for: id) == nil else { return }
 
