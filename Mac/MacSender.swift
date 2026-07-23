@@ -592,7 +592,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 finished = true
                 DispatchQueue.main.async { completion() }
             }
-            connection.send(content: frame, completion: .contentProcessed { _ in finish() })
+            connection.send(content: frame, completion: .contentProcessed { _ in
+                self.queue.async { finish() }
+            })
             self.queue.asyncAfter(deadline: .now() + 1.0) { finish() }
         }
     }
