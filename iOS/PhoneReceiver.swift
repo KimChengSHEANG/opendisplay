@@ -54,10 +54,10 @@ final class PhoneReceiver: ObservableObject {
     // Compatibility signal from the connected Mac (issue #132). Nil = no signal.
     // Merged into the update gate by ReceiverScreen.
     @Published var peerSignal: PeerUpdateSignal?
-    /// Mac display is asleep/locked — phone shows a black UI and dims
-    /// brightness to 20% (apps can't power the panel off). Cleared on
-    /// reconnect or when the user taps to wake the UI. Idle timer is
-    /// re-enabled so Auto-Lock can still lock the device.
+    /// Mac display is asleep/locked — phone shows a black screen and drops
+    /// brightness to 0 (apps can't power the panel off). Idle timer is
+    /// re-enabled so Auto-Lock can still lock the device. Cleared on
+    /// reconnect or when the user taps to wake the UI.
     @Published var hostDisplayOff = false
 
     /// Brightness before we dimmed for host sleep; restored on wake.
@@ -493,24 +493,29 @@ final class PhoneReceiver: ObservableObject {
         }
     }
 
-    /// Host-sleep panel dim level (0…1). Not zero — just quiet enough that the
-    /// phone isn't a bright second monitor while the Mac is dark; Auto-Lock
-    /// (idle timer re-enabled below) still finishes locking the device.
-    private static let hostSleepBrightness: CGFloat = 0.2
+    /// Host-sleep panel brightness (0…1). Zero + black UI is the App Store–safe
+    /// stand-in for “screen off”; the idle timer is re-enabled so Auto-Lock
+    /// can still lock the device.
+    private static let hostSleepBrightness: CGFloat = 0
 
-    /// Dim the panel and flip the UI to black. Apps cannot turn the hardware
-    /// display off; this is the closest App Store–safe stand-in, paired with
-    /// re-enabling the idle timer so Auto-Lock can finish the job.
+    /// Show a black UI and dim the panel. Apps cannot power the hardware
+    /// display off; paired with re-enabling the idle timer so Auto-Lock can
+    /// finish locking the device.
     @MainActor
     func beginHostDisplayOff() {
-        guard !hostDisplayOff else { return }
+        guard !hostDisplayOff else {
+            // Re-assert: something may have bumped brightness / idle timer.
+            UIScreen.main.brightness = Self.hostSleepBrightness
+            UIApplication.shared.isIdleTimerDisabled = false
+            return
+        }
         hostDisplayOff = true
         if brightnessBeforeHostSleep == nil {
             brightnessBeforeHostSleep = UIScreen.main.brightness
         }
         UIScreen.main.brightness = Self.hostSleepBrightness
         UIApplication.shared.isIdleTimerDisabled = false
-        Log.info("host display off — brightness \(Self.hostSleepBrightness), idle timer re-enabled")
+        Log.info("host display off — black UI, brightness 0, idle timer re-enabled for Auto-Lock")
     }
 
     /// Restore brightness / clear the black UI (reconnect or user tap-to-wake).

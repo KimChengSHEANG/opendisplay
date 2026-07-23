@@ -224,7 +224,12 @@ struct ReceiverScreen: View {
         .onValueChange(of: scenePhase) { phase in
             Log.info("scenePhase -> \(String(describing: phase))")
             switch phase {
-            case .active: model.sceneDidActivate()
+            case .active:
+                model.sceneDidActivate()
+                // Stay dark + lockable while Mac is asleep (don't keep awake).
+                if model.receiver.hostDisplayOff {
+                    model.receiver.beginHostDisplayOff()
+                }
             case .background: model.sceneDidBackground()
             default: break
             }
@@ -258,8 +263,7 @@ struct ReceiverScreen: View {
                 showOnboarding = false
                 UIApplication.shared.isIdleTimerDisabled = true
             } else {
-                // Disconnected (including Mac asleep) — let the screen idle
-                // normally instead of keeping it awake for nothing.
+                // Disconnected (including Mac asleep) — let Auto-Lock run.
                 UIApplication.shared.isIdleTimerDisabled = false
             }
         }
