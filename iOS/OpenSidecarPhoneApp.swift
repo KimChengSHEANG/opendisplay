@@ -18,6 +18,92 @@ struct OpenSidecarPhoneApp: App {
     }
 }
 
+// MARK: - iOS 15 back-compat shims
+//
+// The app's floor is iOS 15.0 (project.yml) so devices that top out at
+// 15.8.x — iPhone 6s/7, iPad Air 2, iPad mini 4 — can still be a second
+// screen. These wrap the handful of SwiftUI APIs the UI wants that only
+// exist on 16/17, so call sites stay readable and warning-free.
+
+extension View {
+    /// `onChange(of:)` without the iOS 17 two-parameter form (and without
+    /// the deprecation warning its iOS 15 predecessor earns on 17).
+    @ViewBuilder
+    func onValueChange<V: Equatable>(of value: V,
+                                     perform action: @escaping (V) -> Void) -> some View {
+        if #available(iOS 17.0, *) {
+            onChange(of: value) { _, new in action(new) }
+        } else {
+            onChange(of: value, perform: action)
+        }
+    }
+
+    /// `persistentSystemOverlays(_:)` is iOS 16+; on 15 the home indicator
+    /// just stays visible while streaming.
+    @ViewBuilder
+    func hidingSystemOverlays(_ hidden: Bool) -> some View {
+        if #available(iOS 16.0, *) {
+            persistentSystemOverlays(hidden ? .hidden : .automatic)
+        } else {
+            self
+        }
+    }
+}
+
+/// `NavigationStack` (iOS 16+) or its `NavigationView` equivalent. `.stack`
+/// style is required on iPad, where NavigationView otherwise splits into a
+/// sidebar + detail layout the sheets here are not designed for.
+struct NavStack<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        if #available(iOS 16.0, *) {
+            NavigationStack { content }
+        } else {
+            NavigationView { content }.navigationViewStyle(.stack)
+        }
+    }
+}
+
+/// `LabeledContent` (iOS 16+) or the title/trailing-value row it renders.
+struct LabeledRow: View {
+    let title: String
+    let value: String
+
+    init(_ title: String, value: String) {
+        self.title = title
+        self.value = value
+    }
+
+    var body: some View {
+        if #available(iOS 16.0, *) {
+            LabeledContent(title, value: value)
+        } else {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(value).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// SF Symbol for the USB cable. `cable.connector` is SF Symbols 4 (iOS 16);
+/// an unknown name renders as a blank glyph on 15, so fall back to one that
+/// has shipped since iOS 13.
+let cableSymbol = {
+    if #available(iOS 16.0, *) { return "cable.connector" }
+    return "bolt.horizontal.circle"
+}()
+
+/// Same story for "rotate the device": `rectangle.portrait.rotate` is a later
+/// SF Symbols release than iOS 15 ships, so fall back to the plain rotate
+/// glyph that has been there since iOS 13.
+let rotateSymbol = {
+    if #available(iOS 17.0, *) { return "rectangle.portrait.rotate" }
+    return "rotate.right"
+}()
+
 // MARK: - Shake to open settings
 
 extension Notification.Name {
@@ -91,7 +177,7 @@ struct ReceiverScreen: View {
                 }
             }
             .onAppear { model.receiver.setOrientation(portrait: geo.size.height > geo.size.width) }
-            .onChange(of: geo.size) { _, size in
+            .onValueChange(of: geo.size) { size in
                 model.receiver.setOrientation(portrait: size.height > size.width)
             }
             .sheet(isPresented: $showOnboarding) {
@@ -100,7 +186,7 @@ struct ReceiverScreen: View {
         }
         .ignoresSafeArea(edges: isStreaming ? .all : [])
         .statusBarHidden(isStreaming)
-        .persistentSystemOverlays(isStreaming ? .hidden : .automatic)
+        .hidingSystemOverlays(isStreaming)
         .sheet(isPresented: $showSettings) {
             SettingsView(receiver: model.receiver)
         }
@@ -126,7 +212,7 @@ struct ReceiverScreen: View {
         .onReceive(NotificationCenter.default.publisher(for: .deviceDidShake)) { _ in
             showSettings = true
         }
-        .onChange(of: scenePhase) { _, phase in
+        .onValueChange(of: scenePhase) { phase in
             Log.info("scenePhase -> \(String(describing: phase))")
             switch phase {
             case .active: model.sceneDidActivate()
@@ -156,7 +242,7 @@ struct ReceiverScreen: View {
             for: UIApplication.willTerminateNotification)) { _ in
             model.appWillTerminate()
         }
-        .onChange(of: model.receiver.connected) { _, isConnected in
+        .onValueChange(of: model.receiver.connected) { isConnected in
             // The first valid connection retires the onboarding hint for good.
             if isConnected {
                 hasConnectedBefore = true
@@ -205,7 +291,7 @@ struct IdleView: View {
 
             VStack(alignment: .leading, spacing: 14) {
                 Label("Plug in the USB cable and start the Mac app",
-                      systemImage: "cable.connector")
+                      systemImage: cableSymbol)
                 Label("Or choose this \(deviceKind) under WiFi in the Mac app",
                       systemImage: "wifi")
                 Label("Keep this app open — streaming starts automatically",
@@ -246,7 +332,7 @@ struct OnboardingView: View {
     let onClose: () -> Void
 
     var body: some View {
-        NavigationStack {
+        NavStack {
             ScrollView {
                 VStack(spacing: 28) {
                     Image(systemName: "laptopcomputer.and.iphone")
@@ -315,57 +401,23 @@ struct PerfOverlay: View {
         VStack(spacing: 8) {
             // Metrics wrap onto extra rows when the width doesn't fit —
             // portrait iPhone is ~390pt, far less than one full row.
-            FlowLayout(hSpacing: 14, vSpacing: 8) {
-                // Transport badge — the question "is this cable or WiFi?"
-                Text(stats.transport)
-                    .font(.system(size: 12, weight: .bold, design: .monospaced))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(stats.transport == "USB" ? Color.green.opacity(0.35)
-                                : stats.transport == "WiFi" ? Color.blue.opacity(0.4)
-                                : Color.gray.opacity(0.3),
-                                in: Capsule())
-                    .foregroundStyle(.white)
-
-                if stats.e2eP50 > 0 {
-                    metric("latency", String(format: "%.0f ms", stats.e2eP50))
-                    metric("p95", String(format: "%.0f ms", stats.e2eP95))
-                    metric("encode", String(format: "%.0f ms", stats.encodeP50))
+            // The Layout protocol is iOS 16+; on 15 the row scrolls instead.
+            if #available(iOS 16.0, *) {
+                FlowLayout(hSpacing: 14, vSpacing: 8) { metrics }
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 14) { metrics }
                 }
-                if stats.decodeP50 > 0 {
-                    metric("decode", String(format: "%.1f ms", stats.decodeP50))
-                }
-                if stats.photonP50 > 0 {
-                    // True capture→glass latency (Metal presented handler) —
-                    // the only number that includes display vsync.
-                    metric("photon", String(format: "%.0f ms", stats.photonP50))
-                }
-                if stats.inputP50 > 0 {
-                    // touch→CGEvent on the Mac; full touch-to-photon adds
-                    // the render+capture wait and one e2e on top.
-                    metric("input", String(format: "%.0f ms", stats.inputP50))
-                }
-                metric("rtt", String(format: "%.0f ms", stats.rttMs))
-                metric("FPS", "\(stats.fps)")
-                if stats.capFps > 0 {
-                    metric("Mac cap", "\(stats.capFps)")
-                }
-                metric("Mbit/s", String(format: "%.1f", stats.mbps))
-                metric("stalls", "\(stats.stalls)")
-                metric("enc↓", "\(stats.macEncDrops)")
-                metric("net↓", "\(stats.macNetDrops)")
-                if stats.macPending > 0 {
-                    metric("queue", "\(stats.macPending)")
-                }
-                if stats.decodeFlushes > 0 {
-                    metric("flushes", "\(stats.decodeFlushes)")
-                }
-                metric("res", "\(Int(videoSize.width))×\(Int(videoSize.height))")
             }
             // Two graphs side by side where they fit (landscape), stacked
-            // where they don't (portrait).
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 14) { graphs }
+            // where they don't (portrait). ViewThatFits is iOS 16+; on 15
+            // they always stack.
+            if #available(iOS 16.0, *) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 14) { graphs }
+                    VStack(spacing: 8) { graphs }
+                }
+            } else {
                 VStack(spacing: 8) { graphs }
             }
         }
@@ -373,6 +425,55 @@ struct PerfOverlay: View {
         .padding(.vertical, 9)
         .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
         .padding(.horizontal, 8)
+    }
+
+    @ViewBuilder
+    private var metrics: some View {
+        // Transport badge — the question "is this cable or WiFi?"
+        Text(stats.transport)
+            .font(.system(size: 12, weight: .bold, design: .monospaced))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(stats.transport == "USB" ? Color.green.opacity(0.35)
+                        : stats.transport == "WiFi" ? Color.blue.opacity(0.4)
+                        : Color.gray.opacity(0.3),
+                        in: Capsule())
+            .foregroundStyle(.white)
+
+        if stats.e2eP50 > 0 {
+            metric("latency", String(format: "%.0f ms", stats.e2eP50))
+            metric("p95", String(format: "%.0f ms", stats.e2eP95))
+            metric("encode", String(format: "%.0f ms", stats.encodeP50))
+            }
+            if stats.decodeP50 > 0 {
+                metric("decode", String(format: "%.1f ms", stats.decodeP50))
+            }
+            if stats.photonP50 > 0 {
+                // True capture→glass latency (Metal presented handler) —
+                // the only number that includes display vsync.
+                metric("photon", String(format: "%.0f ms", stats.photonP50))
+            }
+            if stats.inputP50 > 0 {
+                // touch→CGEvent on the Mac; full touch-to-photon adds
+                // the render+capture wait and one e2e on top.
+                metric("input", String(format: "%.0f ms", stats.inputP50))
+            }
+            metric("rtt", String(format: "%.0f ms", stats.rttMs))
+            metric("FPS", "\(stats.fps)")
+            if stats.capFps > 0 {
+                metric("Mac cap", "\(stats.capFps)")
+            }
+            metric("Mbit/s", String(format: "%.1f", stats.mbps))
+            metric("stalls", "\(stats.stalls)")
+            metric("enc↓", "\(stats.macEncDrops)")
+            metric("net↓", "\(stats.macNetDrops)")
+            if stats.macPending > 0 {
+                metric("queue", "\(stats.macPending)")
+            }
+            if stats.decodeFlushes > 0 {
+                metric("flushes", "\(stats.decodeFlushes)")
+            }
+            metric("res", "\(Int(videoSize.width))×\(Int(videoSize.height))")
     }
 
     @ViewBuilder
@@ -409,6 +510,7 @@ struct PerfOverlay: View {
 /// Left-aligned wrapping row: children flow onto as many rows as the
 /// proposed width requires. Keeps the perf overlay inside the screen in
 /// portrait instead of clipping off both edges.
+@available(iOS 16.0, *)
 struct FlowLayout: Layout {
     var hSpacing: CGFloat = 14
     var vSpacing: CGFloat = 8
@@ -496,15 +598,15 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavStack {
             Form {
                 Section("Status") {
-                    LabeledContent("Listening", value: "Port 9000")
-                    LabeledContent("Connection",
-                                   value: receiver.connected ? "Connected" : "Waiting for Mac")
+                    LabeledRow("Listening", value: "Port 9000")
+                    LabeledRow("Connection",
+                               value: receiver.connected ? "Connected" : "Waiting for Mac")
                     if receiver.videoSize != .zero {
-                        LabeledContent("Stream",
-                                       value: "\(Int(receiver.videoSize.width))×\(Int(receiver.videoSize.height)) @ \(receiver.fps) fps")
+                        LabeledRow("Stream",
+                                   value: "\(Int(receiver.videoSize.width))×\(Int(receiver.videoSize.height)) @ \(receiver.fps) fps")
                     }
                 }
 
@@ -544,11 +646,11 @@ struct SettingsView: View {
 
                 Section {
                     Label("USB: plug in the cable, run the Mac app — it connects automatically through the wire (lowest latency).",
-                          systemImage: "cable.connector")
+                          systemImage: cableSymbol)
                     Label("WiFi: both devices on the same network, then pick this \(deviceKind) in the Mac app's Connection menu.",
                           systemImage: "wifi")
                     Label("Rotate the \(deviceKind) for a vertical second monitor.",
-                          systemImage: "rectangle.portrait.rotate")
+                          systemImage: rotateSymbol)
                     Label("Touch: tap to click, drag to drag, two-finger pan to scroll.",
                           systemImage: "hand.tap")
                 } header: {
@@ -564,7 +666,7 @@ struct SettingsView: View {
                 }
 
                 Section("About") {
-                    LabeledContent("Version", value: version)
+                    LabeledRow("Version", value: version)
                     Link(destination: URL(string: "https://github.com/peetzweg/opendisplay")!) {
                         Label("GitHub — peetzweg/opendisplay", systemImage: "link")
                     }
@@ -596,7 +698,7 @@ private struct DeviceNameField: View {
             .textInputAutocapitalization(.words)
             .autocorrectionDisabled()
             .focused($focused)
-            .onChange(of: deviceName) { _, name in onChange(name) }
+            .onValueChange(of: deviceName) { name in onChange(name) }
     }
 }
 

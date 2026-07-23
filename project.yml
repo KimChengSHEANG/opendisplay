@@ -87,7 +87,10 @@ targets:
   OpenSidecariOS:
     type: application
     platform: iOS
-    deploymentTarget: "17.0"
+    # 15.0 floor: the last iOS the A9/A10 devices (iPhone 6s/7, iPad Air 2,
+    # iPad mini 4) can run is 15.8.x, and they make perfectly good second
+    # screens. Anything newer than 15.0 in the code is behind #available.
+    deploymentTarget: "15.0"
     sources:
       - iOS
       - Shared
