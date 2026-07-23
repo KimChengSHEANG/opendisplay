@@ -54,12 +54,13 @@ final class PhoneReceiver: ObservableObject {
     // Compatibility signal from the connected Mac (issue #132). Nil = no signal.
     // Merged into the update gate by ReceiverScreen.
     @Published var peerSignal: PeerUpdateSignal?
-    /// Mac display is asleep/locked — phone shows a black "off" UI and dims
-    /// brightness (apps can't power the panel off). Cleared on reconnect or
-    /// when the user taps to wake the UI.
+    /// Mac display is asleep/locked — phone shows a black UI and dims
+    /// brightness to 20% (apps can't power the panel off). Cleared on
+    /// reconnect or when the user taps to wake the UI. Idle timer is
+    /// re-enabled so Auto-Lock can still lock the device.
     @Published var hostDisplayOff = false
 
-    /// Brightness before we forced it to 0 for host sleep; restored on wake.
+    /// Brightness before we dimmed for host sleep; restored on wake.
     private var brightnessBeforeHostSleep: CGFloat?
 
     private var listener: NWListener?
@@ -492,6 +493,11 @@ final class PhoneReceiver: ObservableObject {
         }
     }
 
+    /// Host-sleep panel dim level (0…1). Not zero — just quiet enough that the
+    /// phone isn't a bright second monitor while the Mac is dark; Auto-Lock
+    /// (idle timer re-enabled below) still finishes locking the device.
+    private static let hostSleepBrightness: CGFloat = 0.2
+
     /// Dim the panel and flip the UI to black. Apps cannot turn the hardware
     /// display off; this is the closest App Store–safe stand-in, paired with
     /// re-enabling the idle timer so Auto-Lock can finish the job.
@@ -502,9 +508,9 @@ final class PhoneReceiver: ObservableObject {
         if brightnessBeforeHostSleep == nil {
             brightnessBeforeHostSleep = UIScreen.main.brightness
         }
-        UIScreen.main.brightness = 0
+        UIScreen.main.brightness = Self.hostSleepBrightness
         UIApplication.shared.isIdleTimerDisabled = false
-        Log.info("host display off — brightness 0, idle timer re-enabled")
+        Log.info("host display off — brightness \(Self.hostSleepBrightness), idle timer re-enabled")
     }
 
     /// Restore brightness / clear the black UI (reconnect or user tap-to-wake).
