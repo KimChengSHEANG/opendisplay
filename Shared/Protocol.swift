@@ -30,4 +30,5 @@ enum WireMessage {
     static let updateRequired = "updateRequired"    // Mac -> phone: peer is below the Mac's floor
     static let sleeping = "sleeping"                // phone -> Mac: device locked, reconnect on wake
     static let closing = "closing"                  // phone -> Mac: app quit, end the session for good
+    static let hostSleeping = "hostSleeping"        // Mac -> phone: Mac display asleep/locked, reconnect when usable
 }

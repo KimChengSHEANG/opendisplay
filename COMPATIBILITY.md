@@ -66,6 +66,10 @@ normal operation** — they only light up after we deliberately raise a floor fo
 a breaking change. Day-to-day, everything is the top row: compatible, with
 newer features gated off for older peers.
 
+**Optional control messages:**
+
+> **`hostSleeping` (Mac → phone, optional):** Mac display sleep or screen lock. New phones call `enterSleep()` (same as local lock). Old phones ignore the type; the Mac still ends the session. Does **not** require a `pv` bump — presence of the message is the feature gate.
+
 ## 4. Who checks what — and why it can't live on one side alone
 
 **Instinct:** "put the compatibility check solely in the Mac app." Mostly right,
