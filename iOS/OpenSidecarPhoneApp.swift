@@ -156,7 +156,16 @@ struct ReceiverScreen: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                if isStreaming {
+                if model.receiver.hostDisplayOff {
+                    // Mac panel is dark — blank this one too. Tap restores the
+                    // idle UI (brightness included) without ending the wait.
+                    Color.black.ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            model.receiver.endHostDisplayOff()
+                        }
+                        .accessibilityLabel("Screen off while Mac is asleep. Tap to wake.")
+                } else if isStreaming {
                     Color.black.ignoresSafeArea()
                     VideoLayerView(displayLayer: model.receiver.displayLayer,
                                    receiver: model.receiver,
@@ -184,9 +193,9 @@ struct ReceiverScreen: View {
                 OnboardingView { onboardingDismissed = true }
             }
         }
-        .ignoresSafeArea(edges: isStreaming ? .all : [])
-        .statusBarHidden(isStreaming)
-        .hidingSystemOverlays(isStreaming)
+        .ignoresSafeArea(edges: (isStreaming || model.receiver.hostDisplayOff) ? .all : [])
+        .statusBarHidden(isStreaming || model.receiver.hostDisplayOff)
+        .hidingSystemOverlays(isStreaming || model.receiver.hostDisplayOff)
         .sheet(isPresented: $showSettings) {
             SettingsView(receiver: model.receiver)
         }

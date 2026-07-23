@@ -54,6 +54,13 @@ final class PhoneReceiver: ObservableObject {
     // Compatibility signal from the connected Mac (issue #132). Nil = no signal.
     // Merged into the update gate by ReceiverScreen.
     @Published var peerSignal: PeerUpdateSignal?
+    /// Mac display is asleep/locked — phone shows a black "off" UI and dims
+    /// brightness (apps can't power the panel off). Cleared on reconnect or
+    /// when the user taps to wake the UI.
+    @Published var hostDisplayOff = false
+
+    /// Brightness before we forced it to 0 for host sleep; restored on wake.
+    private var brightnessBeforeHostSleep: CGFloat?
 
     private var listener: NWListener?
     private var listenerHealthy = false
@@ -474,13 +481,42 @@ final class PhoneReceiver: ObservableObject {
         case WireMessage.hostSleeping:
             // Mac display asleep or locked — same teardown as a local lock,
             // but do not announce sleeping back: the Mac already owns the
-            // reconnect and knows its own state.
+            // reconnect and knows its own state. Also blank the phone panel
+            // (brightness + black UI); iOS won't let us hard-power it off.
             Log.info("Mac host sleeping — entering sleep (no announce, keep listening)")
             enterSleep(announceToMac: false, keepListening: true,
                        status: "Mac asleep — resumes when Mac wakes")
+            DispatchQueue.main.async { self.beginHostDisplayOff() }
         default:
             break
         }
+    }
+
+    /// Dim the panel and flip the UI to black. Apps cannot turn the hardware
+    /// display off; this is the closest App Store–safe stand-in, paired with
+    /// re-enabling the idle timer so Auto-Lock can finish the job.
+    @MainActor
+    func beginHostDisplayOff() {
+        guard !hostDisplayOff else { return }
+        hostDisplayOff = true
+        if brightnessBeforeHostSleep == nil {
+            brightnessBeforeHostSleep = UIScreen.main.brightness
+        }
+        UIScreen.main.brightness = 0
+        UIApplication.shared.isIdleTimerDisabled = false
+        Log.info("host display off — brightness 0, idle timer re-enabled")
+    }
+
+    /// Restore brightness / clear the black UI (reconnect or user tap-to-wake).
+    @MainActor
+    func endHostDisplayOff() {
+        guard hostDisplayOff || brightnessBeforeHostSleep != nil else { return }
+        hostDisplayOff = false
+        if let saved = brightnessBeforeHostSleep {
+            UIScreen.main.brightness = saved
+            brightnessBeforeHostSleep = nil
+        }
+        Log.info("host display off cleared — brightness restored")
     }
 
     private func scheduleWatchdog() {
@@ -949,7 +985,13 @@ final class PhoneReceiver: ObservableObject {
     }
 
     private func setConnected(_ value: Bool) {
-        DispatchQueue.main.async { self.connected = value }
+        DispatchQueue.main.async {
+            self.connected = value
+            if value {
+                // Mac is back — undo the blanked panel from host sleep.
+                self.endHostDisplayOff()
+            }
+        }
         if !value { setStatus("Listening on :9000") }
         else {
             setStatus("Connected")
