@@ -100,8 +100,8 @@ enum StreamFrameRate: Int, CaseIterable, Identifiable {
 /// Unlike [StreamQuality], this changes macOS desktop workspace size (points),
 /// not only encode sharpness — "More Space" / "Extra Space" pack more UI onto
 /// Chromebooks and large Android panels; "Larger Text" does the opposite.
-/// Capture/encode always uses announced panel pixels, so denser presets do
-/// not inflate the H.264 stream.
+/// Capture follows the @2x framebuffer (`2 × points`), so denser presets stay
+/// Retina-sharp; the receiver soft-scales once onto its panel.
 enum DisplayResolution: String, CaseIterable, Identifiable {
     case largerText
     case standard
@@ -133,8 +133,8 @@ enum DisplayResolution: String, CaseIterable, Identifiable {
         switch self {
         case .largerText: return "Fewer points — bigger UI, less desktop space."
         case .standard: return "Retina match — panel pixels at @2x (sharp)."
-        case .moreSpace: return "More desktop points — denser UI; slight soft-scale on the panel."
-        case .extraSpace: return "Maximum desktop real estate — densest UI; softest on-panel scale."
+        case .moreSpace: return "More desktop points — encodes full @2x framebuffer (sharp)."
+        case .extraSpace: return "Maximum desktop real estate — encodes full @2x framebuffer (sharp)."
         }
     }
 
@@ -413,13 +413,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func setupExtend(_ info: PhoneInfo) async throws {
         Log.info("phone hello: \(info.pixelsWide)x\(info.pixelsHigh) @\(info.scale)x resolution=\(displayResolution.rawValue)")
 
-        // VirtualDisplay is always @2x HiDPI: points = panelPixels / 2, so the
-        // framebuffer matches the panel and capture-at-panel stays sharp
-        // (1 framebuffer px ↔ 1 panel px). Do NOT use Android/ChromeOS
-        // DisplayMetrics.density here — density ~1.0 made points ≈ panel,
-        // framebuffer 2× panel, and panel-sized capture looked soft (1 px/pt)
-        // with tiny UI. Receiver density only describes its own chrome.
-        // DisplayResolution then scales the workspace (More/Extra Space).
+        // VirtualDisplay is always @2x HiDPI: points = panelPixels / 2 at
+        // Standard, so the framebuffer matches the panel. Do NOT use
+        // Android/ChromeOS DisplayMetrics.density here — density ~1.0 made
+        // points ≈ panel and panel-sized capture looked soft (1 px/pt).
+        // DisplayResolution scales the workspace; capture follows 2×points
+        // so More/Extra Space stay Retina-sharp.
         let nativeWide = info.pixelsWide / 2
         let nativeHigh = info.pixelsHigh / 2
         let pointsWide = max(2, Int(Double(nativeWide) * displayResolution.pointScale) & ~1)
@@ -483,9 +482,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         inputInjector = InputInjector(displayID: vd.displayID)
 
         let display = try await findSCDisplay(id: vd.displayID)
-        // Quality scaling: capture/encode below native when requested — the
-        // display itself stays native so window layout is unaffected.
+        // Quality scaling: capture the @2x framebuffer (2×points), not the
+        // panel alone — More/Extra Space stay Retina-sharp; the receiver
+        // scales the larger frame onto the panel once.
         let plan = Self.capturePlan(
+            frameBufferWide: pointsWide * 2, frameBufferHigh: pointsHigh * 2,
             panelWide: info.pixelsWide, panelHigh: info.pixelsHigh,
             quality: quality, frameRate: frameRatePreset, deviceKind: info.device
         )
@@ -508,17 +509,25 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    /// Capture/encode size from the receiver's announced **panel pixels**.
-    /// Same path for iPhone/iPad and Chromebook (HW VDA @ full panel).
+    /// Capture/encode size from the virtual display **@2x framebuffer**.
+    /// Standard → framebuffer == panel (sharp 1:1). More/Extra Space → larger
+    /// framebuffer so each point still has 2 px; receiver FIT_XY scales down.
+    /// Bitrate scales with pixel area so bits-per-pixel stays near Standard.
     private static func capturePlan(
+        frameBufferWide: Int, frameBufferHigh: Int,
         panelWide: Int, panelHigh: Int,
         quality: StreamQuality, frameRate: StreamFrameRate, deviceKind: String?
     ) -> (width: Int, height: Int, bitrate: Int, fps: Int) {
         let scale = quality.scale
-        let bitrate = quality.bitrate
         let fps = frameRate.rawValue
-        let width = max(2, Int(Double(panelWide) * scale) & ~1)
-        let height = max(2, Int(Double(panelHigh) * scale) & ~1)
+        let width = max(2, Int(Double(frameBufferWide) * scale) & ~1)
+        let height = max(2, Int(Double(frameBufferHigh) * scale) & ~1)
+        let panelPixels = Double(max(panelWide, 2) * max(panelHigh, 2))
+        let capturePixels = Double(width * height)
+        let bitrate = max(
+            quality.bitrate / 4,
+            Int((Double(quality.bitrate) * capturePixels / panelPixels).rounded())
+        )
         return (width, height, bitrate, fps)
     }
 
