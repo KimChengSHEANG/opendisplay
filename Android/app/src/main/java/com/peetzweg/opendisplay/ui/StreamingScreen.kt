@@ -16,6 +16,7 @@ import android.widget.ImageView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -26,38 +27,26 @@ import com.peetzweg.opendisplay.video.VideoDecoder
 import java.util.Base64
 
 /**
- * Local cursor echo from the Mac (`cursor` / `cursorImg` control messages).
- * Position and size are normalized to the video frame [0,1], same as iOS.
- */
-data class CursorState(
-    val x: Float = 0.5f,
-    val y: Float = 0.5f,
-    val visible: Boolean = false,
-    val bitmap: Bitmap? = null,
-    val anchorX: Float = 0f,
-    val anchorY: Float = 0f,
-    val normW: Float = 0f,
-    val normH: Float = 0f,
-)
-
-/**
  * Fullscreen video surface the Mac's stream is decoded onto, with a sibling
  * [ImageView] for the local cursor sprite.
  *
- * ChromeOS ARC: [SurfaceView] + software AVC. TextureView + hardware VDA
- * commonly paints a solid green buffer even after frames decode. Phones/tablets
- * keep [TextureView] (composites cleanly with overlays; black until the first
- * frame instead of SurfaceView's uninitialized green).
+ * ChromeOS ARC: [SurfaceView] + software AVC. TextureView + VDA paints solid
+ * green; VDA on SurfaceView does too on Cheets. Software is slower, so the Mac
+ * caps Chromebook encode size/fps. Phones/tablets keep [TextureView] + HW.
+ * Cursor position is applied by [cursorController] directly (not Compose).
  */
 @Composable
 fun StreamingScreen(
-    cursor: CursorState,
+    cursorController: CursorController,
     onSurfaceReady: (VideoDecoder) -> Unit,
     onSurfaceDestroyed: () -> Unit,
     onControl: (Map<String, Any>) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val forwarder = remember(onControl) { InputForwarder(onControl) }
+    DisposableEffect(cursorController) {
+        onDispose { cursorController.detach() }
+    }
     AndroidView(
         modifier = modifier.fillMaxSize().background(Color.Black),
         factory = { context ->
@@ -78,6 +67,10 @@ fun StreamingScreen(
                     surfaceView.holder.setFormat(PixelFormat.OPAQUE)
                     surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
                         override fun surfaceCreated(holder: SurfaceHolder) {
+                            // VDA hardware paints solid green on Cheets even
+                            // with SurfaceView; software AVC is the reliable
+                            // path. Mac caps Chromebook encode (~1600p@30) so
+                            // OMX.google stays interactive.
                             onSurfaceReady(
                                 VideoDecoder(
                                     holder.surface,
@@ -147,15 +140,21 @@ fun StreamingScreen(
                 cursorView,
                 FrameLayout.LayoutParams(0, 0).apply { gravity = Gravity.TOP or Gravity.START },
             )
-            root.tag = cursorView
+            cursorController.attach(root, cursorView)
+            // Chromebook trackpad/mouse: hover moves the Mac cursor without a
+            // finger-down. Touch path still covers phones/tablets.
+            video.isFocusable = true
+            video.isFocusableInTouchMode = false
             video.setOnTouchListener { view, event ->
                 handleTouch(forwarder, view.width, view.height, event)
             }
+            video.setOnHoverListener { view, event ->
+                handleHover(forwarder, view.width, view.height, event)
+            }
+            root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                cursorController.relayout()
+            }
             root
-        },
-        update = { root ->
-            val cursorView = root.tag as? ImageView ?: return@AndroidView
-            applyCursor(cursorView, root.width, root.height, cursor)
         },
     )
 }
@@ -168,33 +167,6 @@ fun decodeCursorPng(base64: String): Bitmap? {
     } catch (_: IllegalArgumentException) {
         null
     }
-}
-
-private fun applyCursor(view: ImageView, parentW: Int, parentH: Int, cursor: CursorState) {
-    if (parentW <= 0 || parentH <= 0) return
-    val bmp = cursor.bitmap
-    val show = cursor.visible && bmp != null && cursor.normW > 0f && cursor.normH > 0f
-    if (!show) {
-        view.visibility = android.view.View.GONE
-        return
-    }
-    val w = (cursor.normW * parentW).toInt().coerceAtLeast(1)
-    val h = (cursor.normH * parentH).toInt().coerceAtLeast(1)
-    // Position is the hotspot (anchor) in video space — same as iOS CALayer.
-    val left = (cursor.x * parentW - cursor.anchorX * w).toInt()
-    val top = (cursor.y * parentH - cursor.anchorY * h).toInt()
-    if (view.drawable == null || (view.drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap !== bmp) {
-        view.setImageBitmap(bmp)
-    }
-    val lp = (view.layoutParams as FrameLayout.LayoutParams).apply {
-        width = w
-        height = h
-        leftMargin = left
-        topMargin = top
-        gravity = Gravity.TOP or Gravity.START
-    }
-    view.layoutParams = lp
-    view.visibility = android.view.View.VISIBLE
 }
 
 /**
@@ -223,6 +195,19 @@ private fun handleTouch(forwarder: InputForwarder, width: Int, height: Int, even
         MotionEvent.ACTION_CANCEL -> forwarder.cancel(event.getX(0), event.getY(0), width, height)
     }
     return true
+}
+
+/** Chromebook/mouse hover → Mac `mouseMoved` (touch phase `moved` while up). */
+private fun handleHover(forwarder: InputForwarder, width: Int, height: Int, event: MotionEvent): Boolean {
+    when (event.actionMasked) {
+        MotionEvent.ACTION_HOVER_MOVE,
+        MotionEvent.ACTION_HOVER_ENTER -> {
+            forwarder.hover(event.x, event.y, width, height)
+            return true
+        }
+        MotionEvent.ACTION_HOVER_EXIT -> return true
+    }
+    return false
 }
 
 private fun focusX(event: MotionEvent): Float = (event.getX(0) + event.getX(1)) / 2f

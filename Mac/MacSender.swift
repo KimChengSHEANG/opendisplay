@@ -101,10 +101,9 @@ enum DisplayResolution: String, CaseIterable, Identifiable {
 
     /// Sensible default when the user hasn't picked one yet.
     static func `default`(forDeviceKind kind: String?) -> DisplayResolution {
-        // Chromebook / large ARC windows report laptop-class pixel counts; the
-        // phone-oriented Standard (pixels/2) leaves the Mac desktop feeling cramped.
-        if kind == "Chromebook" { return .moreSpace }
-        return .standard
+        // Keep Chromebook at Standard — More Space inflates the encode past
+        // what ARC can decode smoothly on typical hardware.
+        .standard
     }
 }
 
@@ -166,6 +165,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private let mode: CaptureMode
     private let quality: StreamQuality
     private let displayResolution: DisplayResolution
+    /// Bitrate / fps applied to the live encoder — may be tighter than
+    /// [quality] for Chromebook (see `capturePlan`).
+    private var encodeBitrate: Int = 18_000_000
+    private var encodeFrameRate: Int = 60
     // Stable per-device serial for the virtual display, so macOS can tell
     // multiple OpenDisplay monitors apart and persist their arrangement.
     private let displaySerial: UInt32
@@ -429,9 +432,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let display = try await findSCDisplay(id: vd.displayID)
         // Quality scaling: capture/encode below native when requested — the
         // display itself stays native so window layout is unaffected.
-        let captureW = (Int(Double(pointsWide * 2) * quality.scale)) & ~1
-        let captureH = (Int(Double(pointsHigh * 2) * quality.scale)) & ~1
-        try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
+        let plan = Self.capturePlan(
+            pointsWide: pointsWide, pointsHigh: pointsHigh,
+            quality: quality, deviceKind: info.device
+        )
+        encodeBitrate = plan.bitrate
+        encodeFrameRate = plan.fps
+        try await startCapture(
+            display: display,
+            pixelsWide: plan.width,
+            pixelsHigh: plan.height,
+            frameRate: plan.fps,
+        )
 
         // Debug aid (`defaults write sh.peet.opensidecar.mac testPattern -bool true`):
         // an animated window on the virtual display generates a constant frame
@@ -440,6 +452,34 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let id = vd.displayID
             Task { @MainActor in TestPattern.show(on: id) }
         }
+    }
+
+    /// Capture/encode size for the virtual display framebuffer.
+    /// Chromebook uses software AVC (VDA greens); keep encode under ~1600p@30
+    /// so OMX.google stays interactive without the soft 720p upscale.
+    private static func capturePlan(
+        pointsWide: Int, pointsHigh: Int,
+        quality: StreamQuality, deviceKind: String?
+    ) -> (width: Int, height: Int, bitrate: Int, fps: Int) {
+        var scale = quality.scale
+        var bitrate = quality.bitrate
+        var fps = 60
+        var maxLongEdge = Int.max
+        if deviceKind == "Chromebook" {
+            scale = min(scale, 0.75)
+            bitrate = min(bitrate, 10_000_000)
+            fps = 30
+            maxLongEdge = 1600
+        }
+        var width = max(2, Int(Double(pointsWide * 2) * scale) & ~1)
+        var height = max(2, Int(Double(pointsHigh * 2) * scale) & ~1)
+        let longEdge = max(width, height)
+        if longEdge > maxLongEdge {
+            let s = Double(maxLongEdge) / Double(longEdge)
+            width = max(2, Int(Double(width) * s) & ~1)
+            height = max(2, Int(Double(height) * s) & ~1)
+        }
+        return (width, height, bitrate, fps)
     }
 
     /// Tear down and rebuild when the phone announces new dimensions. Loops
@@ -488,16 +528,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                       userInfo: [NSLocalizedDescriptionKey: "virtual display never appeared in SCShareableContent"])
     }
 
-    private func startCapture(display: SCDisplay, pixelsWide: Int, pixelsHigh: Int) async throws {
+    private func startCapture(display: SCDisplay, pixelsWide: Int, pixelsHigh: Int,
+                              frameRate: Int = 60) async throws {
         let filter = SCContentFilter(display: display, excludingWindows: [])
 
         let config = SCStreamConfiguration()
         config.width = pixelsWide
         config.height = pixelsHigh
-        // Ask for 120 even though the virtual display is 60Hz: requesting
-        // exactly 1/60 makes SCK's rate limiter skip frames that arrive a
-        // hair early (beat frequency) — measured ~51fps instead of 60.
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 120)
+        // Ask above the target fps so SCK's rate limiter doesn't skip frames
+        // that arrive a hair early (beat frequency). Chromebook uses 30fps;
+        // phones stay near 60 via a 120 request.
+        let askRate = max(frameRate * 2, frameRate + 15)
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(askRate))
         // 420v matches the encoder's native input — skips a BGRA→YUV conversion
         // inside VideoToolbox. (`-pixfmt bgra` reverts for A/B testing.)
         config.pixelFormat = UserDefaults.standard.string(forKey: "pixfmt") == "bgra"
@@ -508,6 +550,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         config.queueDepth = 8
         config.showsCursor = !localCursor
 
+        encodeFrameRate = frameRate
         setupEncoder(width: pixelsWide, height: pixelsHigh)
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
@@ -518,7 +561,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         lastCursorPNGHash = 0      // rotation rebuilds: re-send the sprite
         lastCursorSent = (-1, -1, false)
         startCursorEcho()
-        Log.info("capture started: \(pixelsWide)x\(pixelsHigh) display \(display.displayID) mode \(mode.rawValue) localCursor=\(localCursor)")
+        Log.info("capture started: \(pixelsWide)x\(pixelsHigh)@\(frameRate) display \(display.displayID) mode \(mode.rawValue) localCursor=\(localCursor)")
         let kind = lastHello?.kind ?? "device"
         await status("\(mode == .extend ? "Extending to" : "Mirroring to") \(kind) (\(pixelsWide)×\(pixelsHigh))")
     }
@@ -1150,11 +1193,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 3600 as CFNumber)
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 60 as CFNumber)
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
-        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_AverageBitRate, value: quality.bitrate as CFNumber)
-        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60 as CFNumber)
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_AverageBitRate, value: encodeBitrate as CFNumber)
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: encodeFrameRate as CFNumber)
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
         VTCompressionSessionPrepareToEncodeFrames(encoder)
-        Log.info("encoder ready: \(width)x\(height) H.264 \(quality.bitrate / 1_000_000)Mbps quality=\(quality.rawValue) lowLatencyRC=\(lowLatency)")
+        Log.info("encoder ready: \(width)x\(height) H.264 \(encodeBitrate / 1_000_000)Mbps@\(encodeFrameRate)fps quality=\(quality.rawValue) lowLatencyRC=\(lowLatency)")
     }
 
     // MARK: - Capture callback

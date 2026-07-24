@@ -41,6 +41,15 @@ class InputForwarder(private val send: (Map<String, Any>) -> Unit) {
         touch("moved", x, y, width, height)
     }
 
+    /**
+     * Mouse/trackpad hover (no button): Mac treats touch `moved` while up as
+     * `mouseMoved`. Chromebook ARC delivers these as ACTION_HOVER_MOVE.
+     */
+    fun hover(x: Float, y: Float, width: Int, height: Int) {
+        if (twoFingerActive || multiTouchOccurred) return
+        touch("moved", x, y, width, height)
+    }
+
     /** The single tracked finger lifted. Ignored once a second finger has joined this gesture. */
     fun up(x: Float, y: Float, width: Int, height: Int) {
         if (twoFingerActive || multiTouchOccurred) {

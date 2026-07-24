@@ -33,7 +33,7 @@ import com.peetzweg.opendisplay.session.InstallId
 import com.peetzweg.opendisplay.session.ReceiverSession
 import com.peetzweg.opendisplay.settings.AppSettings
 import com.peetzweg.opendisplay.sleep.HostSleepController
-import com.peetzweg.opendisplay.ui.CursorState
+import com.peetzweg.opendisplay.ui.CursorController
 import com.peetzweg.opendisplay.ui.IdleScreen
 import com.peetzweg.opendisplay.ui.PerfOverlay
 import com.peetzweg.opendisplay.ui.SettingsScreen
@@ -51,7 +51,7 @@ class MainActivity : ComponentActivity() {
     private var deviceName by mutableStateOf("")
     private var showAnalytics by mutableStateOf(false)
     private var fps by mutableStateOf(0)
-    private var cursor by mutableStateOf(CursorState())
+    private val cursorController = CursorController()
     private var updateRequired by mutableStateOf<VersionGate.Update?>(null)
     private var recommendedUpdate by mutableStateOf<VersionGate.Update?>(null)
     private val versionGate = VersionGate()
@@ -134,7 +134,7 @@ class MainActivity : ComponentActivity() {
                 deviceName = deviceName,
                 showAnalytics = showAnalytics,
                 fps = fps,
-                cursor = cursor,
+                cursorController = cursorController,
                 updateRequired = updateRequired,
                 recommendedUpdate = recommendedUpdate,
                 onWake = {
@@ -314,7 +314,7 @@ class MainActivity : ComponentActivity() {
         override fun onDisconnected() {
             runOnUiThread {
                 connected = false
-                cursor = CursorState()
+                cursorController.hide()
                 pendingSyncFrame = null
                 fpsHandler.removeCallbacks(kfRetryRunnable)
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -338,13 +338,15 @@ class MainActivity : ComponentActivity() {
 
         override fun onControl(map: Map<String, Any>) {
             when (map["type"]) {
-                "cursor" -> runOnUiThread {
+                "cursor" -> {
                     val visible = (map["v"] as? Number)?.toInt() == 1
-                    cursor = cursor.copy(
-                        x = (map["x"] as? Number)?.toFloat() ?: cursor.x,
-                        y = (map["y"] as? Number)?.toFloat() ?: cursor.y,
-                        visible = visible,
-                    )
+                    val x = (map["x"] as? Number)?.toFloat()
+                    val y = (map["y"] as? Number)?.toFloat()
+                    // Apply on the UI thread without Compose state — see CursorController.
+                    when {
+                        x != null && y != null -> cursorController.move(x, y, visible)
+                        !visible -> cursorController.hide()
+                    }
                 }
                 "cursorImg" -> {
                     val b64 = map["png"] as? String ?: return
@@ -353,15 +355,7 @@ class MainActivity : ComponentActivity() {
                     val ax = (map["ax"] as? Number)?.toFloat() ?: 0f
                     val ay = (map["ay"] as? Number)?.toFloat() ?: 0f
                     val bmp = decodeCursorPng(b64) ?: return
-                    runOnUiThread {
-                        cursor = cursor.copy(
-                            bitmap = bmp,
-                            normW = nw,
-                            normH = nh,
-                            anchorX = ax,
-                            anchorY = ay,
-                        )
-                    }
+                    cursorController.setSprite(bmp, nw, nh, ax, ay)
                 }
                 WireMessage.hostSleeping -> runOnUiThread {
                     hostSleep.onHostSleeping()
@@ -398,7 +392,7 @@ fun OpenDisplayApp(
     deviceName: String,
     showAnalytics: Boolean,
     fps: Int,
-    cursor: CursorState,
+    cursorController: CursorController,
     updateRequired: VersionGate.Update?,
     recommendedUpdate: VersionGate.Update?,
     onWake: () -> Unit,
@@ -427,7 +421,7 @@ fun OpenDisplayApp(
         } else if (connected) {
             Box(modifier = Modifier.fillMaxSize()) {
                 StreamingScreen(
-                    cursor = cursor,
+                    cursorController = cursorController,
                     onSurfaceReady = onSurfaceReady,
                     onSurfaceDestroyed = onSurfaceDestroyed,
                     onControl = onControl,

@@ -4,7 +4,7 @@
 #   make mac     # build the macOS sender app
 #   make ios     # build the iOS receiver app (simulator SDK, unsigned)
 #   make all     # both
-#   make run     # build + launch the Mac app
+#   make run     # build Mac app, kill any running instance, launch
 #   make clean
 
 CONFIG ?= Debug
