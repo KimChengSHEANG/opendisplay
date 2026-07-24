@@ -152,6 +152,9 @@ the floor once a force-capable build has spread.
   platform-tools) — there is no usbmuxd equivalent, so the wired transport
   shells out to `adb forward`. WiFi (Bonjour) needs no external tool. The wire
   protocol is identical across transports and platforms.
+- **Chromebooks** run the same Android APK but connect over **WiFi/Ethernet
+  only** in v1 — USB debugging into ARC is out of scope; treat Chromebook as a
+  WiFi peer in the Mac device list.
 
 **Breaking changes are two-phase (never one-shot):**
 

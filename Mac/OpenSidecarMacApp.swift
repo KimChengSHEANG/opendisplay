@@ -233,6 +233,16 @@ final class SenderController: ObservableObject {
         UserDefaults.standard.dictionary(forKey: "installIDByUDID") as? [String: String] ?? [:] {
         didSet { UserDefaults.standard.set(installIDByUDID, forKey: "installIDByUDID") }
     }
+    // Receiver kind ("Android", "Chromebook", …) learned from hello — keyed by
+    // install id, Bonjour service name, or ADB serial so WiFi rows can show
+    // Android vs Chromebook before the user connects again.
+    @Published private var knownReceiverKinds: [String: String] =
+        UserDefaults.standard.dictionary(forKey: "knownReceiverKinds") as? [String: String] ?? [:] {
+        didSet { UserDefaults.standard.set(knownReceiverKinds, forKey: "knownReceiverKinds") }
+    }
+
+    /// False when platform-tools `adb` is missing — Android USB is disabled.
+    var adbInstalled: Bool { Adb.findAdb() != nil }
     private let autoConnectEnabled = UserDefaults.standard.object(forKey: "autostart") == nil
         || UserDefaults.standard.bool(forKey: "autostart")
 
@@ -310,6 +320,30 @@ final class SenderController: ObservableObject {
     private func txtID(of result: NWBrowser.Result) -> String? {
         if case .bonjour(let txt) = result.metadata { return txt["id"] }
         return nil
+    }
+
+    /// Android/Chromebook kind for a WiFi peer, when known from a past hello.
+    private func androidKindHint(forWiFi result: NWBrowser.Result) -> String? {
+        if let session = activeSession(coveringWiFi: result), let kind = session.deviceKind,
+           kind == "Android" || kind == "Chromebook" { return kind }
+        if let name = serviceName(of: result), let kind = knownReceiverKinds["wifi:\(name)"],
+           kind == "Android" || kind == "Chromebook" { return kind }
+        if let id = txtID(of: result), let kind = knownReceiverKinds[id],
+           kind == "Android" || kind == "Chromebook" { return kind }
+        return nil
+    }
+
+    private func rememberReceiverKind(_ kind: String, installID: String?,
+                                      target: ConnectionTarget) {
+        if let installID { knownReceiverKinds[installID] = kind }
+        switch target {
+        case .wifi(let result):
+            if let name = serviceName(of: result) { knownReceiverKinds["wifi:\(name)"] = kind }
+        case .androidUsb(let serial):
+            knownReceiverKinds["adb:\(serial)"] = kind
+        default:
+            break
+        }
     }
 
     /// Same hardware? Strong match: the service's install id equals the id
@@ -559,7 +593,7 @@ final class SenderController: ObservableObject {
         case .wifi(let result):
             return serviceName(of: result) ?? "WiFi device"
         case .androidUsb:
-            return "Android"
+            return "Android (USB)"
         }
     }
 
@@ -666,6 +700,9 @@ final class SenderController: ObservableObject {
             guard let self, let session else { return }
             session.deviceID = info.id
             session.deviceKind = info.device
+            if let kind = info.device {
+                self.rememberReceiverKind(kind, installID: info.id, target: session.target)
+            }
             if case .usb(let udid?) = session.target, let installID = info.id {
                 self.installIDByUDID[udid] = installID
             }
@@ -761,14 +798,30 @@ final class SenderController: ObservableObject {
         let name: String
         let usbTarget: ConnectionTarget?
         let wifiTarget: ConnectionTarget?
+        /// "Android" or "Chromebook" when known — shown in the transport line.
+        let kindHint: String?
+
+        init(id: String, name: String, usbTarget: ConnectionTarget?,
+             wifiTarget: ConnectionTarget?, kindHint: String? = nil) {
+            self.id = id
+            self.name = name
+            self.usbTarget = usbTarget
+            self.wifiTarget = wifiTarget
+            self.kindHint = kindHint
+        }
 
         var transportLabel: String {
+            let base: String
             switch (usbTarget != nil, wifiTarget != nil) {
-            case (true, true): return "USB · WiFi"
-            case (true, false): return "USB"
-            case (false, true): return "WiFi"
-            default: return ""
+            case (true, true): base = "USB · WiFi"
+            case (true, false): base = "USB"
+            case (false, true): base = "WiFi"
+            default: base = ""
             }
+            if let kindHint, kindHint == "Android" || kindHint == "Chromebook" {
+                return base.isEmpty ? kindHint : "\(base) · \(kindHint)"
+            }
+            return base
         }
         /// Lowest latency first.
         var preferredTarget: ConnectionTarget? { usbTarget ?? wifiTarget }
@@ -810,11 +863,15 @@ final class SenderController: ObservableObject {
         for device in androidDevices {
             let target = ConnectionTarget.androidUsb(serial: device.serial)
             coveredSessionIDs.insert(target.sessionID)
+            let kind = knownReceiverKinds["adb:\(device.serial)"] ?? "Android"
             entries.append(DeviceEntry(
                 id: "android:\(device.serial)",
-                name: device.authorized ? "Android" : "Android (tap Allow on phone)",
+                name: device.authorized
+                    ? device.label
+                    : "\(device.label) — tap Allow on phone",
                 usbTarget: device.authorized ? target : nil,
-                wifiTarget: nil))
+                wifiTarget: nil,
+                kindHint: kind == "Chromebook" ? kind : "Android"))
         }
         for result in discovered {
             guard let name = serviceName(of: result), !mergedServices.contains(name)
@@ -827,8 +884,10 @@ final class SenderController: ObservableObject {
             if let covering = activeSession(coveringWiFi: result) {
                 coveredSessionIDs.insert(covering.id)
             }
-            entries.append(DeviceEntry(id: "service:\(name)", name: name,
-                                       usbTarget: nil, wifiTarget: target))
+            entries.append(DeviceEntry(
+                id: "service:\(name)", name: name,
+                usbTarget: nil, wifiTarget: target,
+                kindHint: androidKindHint(forWiFi: result)))
         }
         // Sessions whose device vanished from discovery (e.g. Bonjour record
         // gone while the stream is still alive) keep a row to disconnect.
@@ -931,8 +990,13 @@ struct ContentView: View {
             // Settings
             Form {
                 Section("Devices") {
+                    if !controller.adbInstalled {
+                        Text("Android USB requires adb (Android platform-tools). Install with `brew install --cask android-platform-tools`, enable USB debugging on the phone, and tap Allow when prompted.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     if controller.deviceEntries.isEmpty {
-                        Text("No devices found — plug one in via USB, or open the OpenDisplay app on a device on this WiFi network.")
+                        Text("No devices found — plug in an iPhone/iPad or Android phone via USB, or open OpenDisplay on a device on this WiFi network (Android phones, tablets, and Chromebooks over WiFi).")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

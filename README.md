@@ -153,6 +153,9 @@ cd Android
 
 Or open the `Android/` folder in Android Studio and hit Run.
 
+See [Android/README.md](Android/README.md) for sideload install steps (the
+TestFlight-equivalent for Android).
+
 ### Run (USB — recommended)
 
 1. Install + open **OpenDisplay** on the iPhone (it listens on port 9000).
@@ -167,11 +170,22 @@ For **Android** receivers, plug in a phone with USB debugging enabled — the
 Mac needs `adb` on its PATH (see Prerequisites) and auto-connects over the
 cable via `adb forward`. No WiFi needed.
 
+**Chromebooks** use WiFi or Ethernet only (no USB cable path). Install the
+Android APK on the Chromebook, join the same network as the Mac, and pick the
+device from the Mac app's Devices list.
+
 ### Run (WiFi)
 
-Open the iPhone app, then pick **"iPhone (WiFi)"** from the Connection menu
-in the Mac app. Discovery is automatic via Bonjour. USB has lower latency;
-WiFi has no cable.
+Open the receiver app on the device, then pick it from the **Devices** list in
+the Mac app. Discovery is automatic via Bonjour. USB has lower latency; WiFi
+has no cable.
+
+- **iPhone / iPad:** keep OpenDisplay open in the foreground.
+- **Android phone / tablet:** USB (with `adb forward`) or WiFi.
+- **Chromebook:** WiFi or Ethernet only — no USB path.
+
+Both sides need **Local Network** permission on the Mac (and on iOS for WiFi).
+Android WiFi discovery uses the same Bonjour service as iOS.
 
 ### Permissions checklist
 

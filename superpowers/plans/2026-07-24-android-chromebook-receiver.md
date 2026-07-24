@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a Kotlin/Compose Android receiver (phones, tablets, Chromebooks) with iOS feature parity, discovered by the same OpenDisplay Mac app over WiFi and USB (ADB reverse for phones/tablets).
+**Goal:** Ship a Kotlin/Compose Android receiver (phones, tablets, Chromebooks) with iOS feature parity, discovered by the same OpenDisplay Mac app over WiFi and USB (ADB forward for phones/tablets).
 
-**Architecture:** Device listens on TCP `:9000` with the same length-prefixed Annex B + JSON control wire as iOS. Android advertises `_opensidecar._tcp` via NSD; Mac Bonjour finds WiFi peers. USB uses `adb reverse tcp:9000` then Mac dials `127.0.0.1:9000`. Chromebook v1 is WiFi/Ethernet only.
+**Architecture:** Device listens on TCP `:9000` with the same length-prefixed Annex B + JSON control wire as iOS. Android advertises `_opensidecar._tcp` via NSD; Mac Bonjour finds WiFi peers. USB uses `adb forward tcp:9000 tcp:9000` then Mac dials `127.0.0.1:9000`. Chromebook v1 is WiFi/Ethernet only.
 
-**Tech Stack:** Kotlin, Jetpack Compose, MediaCodec, NsdManager, Okio/Java NIO sockets, Gradle; Mac Swift extensions (`AdbDeviceWatcher`, reverse helper); existing `MacSender` TCP path.
+**Tech Stack:** Kotlin, Jetpack Compose, MediaCodec, NsdManager, Okio/Java NIO sockets, Gradle; Mac Swift extensions (`AdbDeviceWatcher`, forward helper); existing `MacSender` TCP path.
 
 ## Global Constraints
 
@@ -40,7 +40,7 @@ This is one plan for the full v1 bar. Tasks are ordered so each slice is indepen
 | `Android/.../sleep/HostSleepController.kt` | hostSleeping UI/brightness |
 | `Android/.../version/VersionGate.kt` | Update gate |
 | `Android/.../ui/*` | Compose screens |
-| `Mac/Adb.swift` (or `Mac/AdbDeviceWatcher.swift`) | ADB list/watch/reverse |
+| `Mac/Adb.swift` (or `Mac/AdbDeviceWatcher.swift`) | ADB list/watch/forward |
 | `Mac/OpenSidecarMacApp.swift` | Android USB targets in controller |
 | `COMPATIBILITY.md` / `README.md` | Android + Chromebook notes |
 
@@ -365,7 +365,7 @@ Match iOS:
 
 ---
 
-### Task 9: Mac ADB watcher + reverse
+### Task 9: Mac ADB watcher + forward
 
 **Files:**
 - Create: `Mac/Adb.swift`
@@ -376,11 +376,11 @@ Match iOS:
 - Produces:
   - `struct AdbDevice: Identifiable { let serial: String; var authorized: Bool }`
   - `final class AdbDeviceWatcher { var onChange: ([AdbDevice]) -> Void; func start(); func stop() }`
-  - `enum Adb { static func reverse(serial: String, port: UInt16) throws; static func clearReverse(serial: String) throws; static func findAdb() -> URL? }`
-- Behavior: shell out to `adb` (`which adb` / `~/Library/Android/sdk/platform-tools/adb`); `adb devices`; `adb -s SERIAL reverse tcp:9000 tcp:9000`; dial `NWEndpoint.hostPort(host: "127.0.0.1", port: 9000)` via existing TCP transport
+  - `enum Adb { static func forward(serial: String, port: UInt16) throws; static func clearForward(serial: String) throws; static func findAdb() -> URL? }`
+- Behavior: shell out to `adb` (`which adb` / `~/Library/Android/sdk/platform-tools/adb`); `adb devices`; `adb -s SERIAL forward tcp:9000 tcp:9000`; dial `NWEndpoint.hostPort(host: "127.0.0.1", port: 9000)` via existing TCP transport
 - ConnectionTarget gains `.androidUsb(serial: String)` with sessionID `adb:<serial>`
 
-- [ ] **Step 1: Implement Adb.swift with list + reverse + clear.**
+- [ ] **Step 1: Implement Adb.swift with list + forward + clear.**
 
 - [ ] **Step 2: Watcher polls every 2s or uses `adb track-devices`.**
 
@@ -388,7 +388,7 @@ Match iOS:
 
 - [ ] **Step 4: Manual — cable phone streams without WiFi.**
 
-- [ ] **Step 5: Commit** `feat(mac): ADB reverse USB transport for Android receivers`
+- [ ] **Step 5: Commit** `feat(mac): ADB forward USB transport for Android receivers`
 
 ---
 
@@ -424,7 +424,7 @@ Match iOS:
 | Orientation | 7 |
 | Sleep / hostSleeping / closing | 7 |
 | Settings + version gate | 8 |
-| USB ADB reverse phones/tablets | 9 |
+| USB ADB forward phones/tablets | 9 |
 | Same Mac app | 9–10 |
 | Chromebook WiFi; USB out of scope | 5, 10 |
 | COMPATIBILITY / README | 10 |

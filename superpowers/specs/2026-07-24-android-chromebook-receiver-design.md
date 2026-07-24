@@ -13,7 +13,7 @@ OpenDisplay today is Mac sender + iOS receiver only. Users with Android phones/t
 1. Native **Kotlin + Jetpack Compose** Android receiver APK (phones, tablets, Chromebooks).
 2. Speak the **same wire protocol** as iOS (listen `:9000`, length-prefixed Annex B H.264, JSON control).
 3. Integrate with the **same Mac OpenDisplay app** (device list alongside iPhone/iPad).
-4. **WiFi** via mDNS `_opensidecar._tcp` and **USB** via ADB reverse TCP (phones/tablets).
+4. **WiFi** via mDNS `_opensidecar._tcp` and **USB** via ADB forward TCP (phones/tablets).
 5. Feature parity with iOS before v1: stream, discovery, handshake, touch/scroll, orientation, sleep/`hostSleeping`, settings, version gate, USB.
 
 ## Non-goals (v1)
@@ -35,7 +35,7 @@ CGVirtualDisplay → capture → H.264
    ← JSON control (hello, touch, scroll,     ControlChannel
       sleeping, closing, welcome, …)
 WiFi: NWBrowser _opensidecar._tcp  ←──→  NsdManager advertise
-USB:  adb reverse tcp:9000 + dial 127.0.0.1:9000  (phones/tablets)
+USB:  adb forward tcp:9000 + dial 127.0.0.1:9000  (phones/tablets)
 ```
 
 Mental model unchanged: **device listens, Mac connects.**
@@ -52,7 +52,7 @@ Mental model unchanged: **device listens, Mac connects.**
 | Sleep | Local lock → `sleeping`; quit → `closing`; Mac `hostSleeping` → black UI, brightness 0, allow Auto-Lock, **keep listening** for Mac wake |
 | Settings | Device name, analytics overlay, prefs aligned with iOS where applicable |
 | Version gate | Remote config + peer signals (same product rules as COMPATIBILITY.md) |
-| USB | Cable path for Android phones/tablets via ADB reverse |
+| USB | Cable path for Android phones/tablets via ADB forward |
 
 ## Transports
 
@@ -64,13 +64,13 @@ Mental model unchanged: **device listens, Mac connects.**
 
 ### USB (phones/tablets) — required for v1
 
-Apple `usbmuxd` does not apply. Use **ADB reverse TCP**:
+Apple `usbmuxd` does not apply. Use **ADB forward TCP** (the receiver listens on the device; forward routes Mac localhost to device localhost):
 
 1. App listens on `:9000`.
 2. Mac detects authorized ADB device (`adb devices` / watcher).
-3. Mac runs `adb -s <serial> reverse tcp:9000 tcp:9000`.
+3. Mac runs `adb -s <serial> forward tcp:9000 tcp:9000`.
 4. Mac dials `127.0.0.1:9000` (existing TCP sender path).
-5. Detach → remove reverse + end session (parity with usbmux unplug).
+5. Detach → remove forward + end session (parity with usbmux unplug).
 
 **Mac dependency:** Android `adb` (platform-tools) — bundle a pinned version or detect Homebrew/`PATH` and prompt if missing. Device needs USB debugging authorized once.
 
@@ -116,13 +116,13 @@ Slices stay mergeable, but **v1 is not declared until the parity checklist + USB
 1. Android WiFi MVP (listen, decode, hello, touch/scroll, NSD)
 2. Mac Bonjour + UI recognition of Android peers
 3. Parity features (sleep, hostSleeping, settings, version gate, orientation)
-4. Mac ADB watcher + reverse + USB session policy
+4. Mac ADB watcher + forward + USB session policy
 5. Chromebook validation (WiFi), docs, packaging
 
 ## Testing (manual)
 
 - Android phone WiFi stream + touch/scroll + rotate
-- Android phone USB (adb reverse) plug/unplug
+- Android phone USB (adb forward) plug/unplug
 - Chromebook WiFi stream
 - Local lock → Mac tears down + wake reconnect
 - Mac display sleep/lock → phone black + Auto-Lock allowed + Mac wake reconnect
