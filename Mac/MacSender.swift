@@ -407,11 +407,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func setupExtend(_ info: PhoneInfo) async throws {
         Log.info("phone hello: \(info.pixelsWide)x\(info.pixelsHigh) @\(info.scale)x resolution=\(displayResolution.rawValue)")
 
-        // Phone panel is @3x; the virtual display runs @2x HiDPI, so points
-        // = native pixels / 2 (rounded down to even for the encoder). Per-device
-        // DisplayResolution then scales that workspace ("More Space" / "Larger Text").
-        let nativeWide = info.pixelsWide / 2
-        let nativeHigh = info.pixelsHigh / 2
+        // The virtual display runs @2x HiDPI, so points = native pixels / 2.
+        // That is right for iOS, whose panels are always @2x or @3x — and it
+        // is what every existing iOS session has shipped with, so leave it be.
+        // Android reports its real density and it goes down to ~1.0 on
+        // ChromeOS: halving an already-1x panel gives a desktop with half the
+        // points it should have, so macOS renders its UI at roughly twice the
+        // intended size. Only depart from /2 when the receiver says it is
+        // below 2x. Per-device DisplayResolution then scales that workspace.
+        let hidpiDivisor = min(2.0, max(1.0, info.scale))
+        let nativeWide = Int(Double(info.pixelsWide) / hidpiDivisor)
+        let nativeHigh = Int(Double(info.pixelsHigh) / hidpiDivisor)
         let pointsWide = max(2, Int(Double(nativeWide) * displayResolution.pointScale) & ~1)
         let pointsHigh = max(2, Int(Double(nativeHigh) * displayResolution.pointScale) & ~1)
         // Rough physical size so macOS picks a sane default UI scale.
