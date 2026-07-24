@@ -11,23 +11,59 @@ object FrameCodec {
         return out
     }
 
+    /**
+     * Accumulates bytes across [push] calls and emits complete length-prefixed
+     * frames. Backed by a growable byte buffer with a read cursor (mirrors
+     * `PhoneReceiver.drainFrames` on iOS): each batch is scanned once and the
+     * buffer is compacted at most once per call — O(n) in bytes received, not
+     * the O(n²) of the old per-byte `ArrayList` + `removeAt(0)`.
+     */
     class Deframer {
-        private val buf = ArrayList<Byte>()
+        private var buf = ByteArray(INITIAL_CAPACITY)
+        private var size = 0
+
         fun push(data: ByteArray): List<ByteArray> {
-            for (b in data) buf.add(b)
+            append(data)
             val frames = ArrayList<ByteArray>()
-            while (true) {
-                if (buf.size < 4) break
-                val len = ByteBuffer.wrap(byteArrayOf(buf[0], buf[1], buf[2], buf[3]))
-                    .order(ByteOrder.BIG_ENDIAN).int
-                if (len < 0 || len > 1 shl 22) { buf.clear(); break }
-                if (buf.size < 4 + len) break
-                val payload = ByteArray(len)
-                for (i in 0 until len) payload[i] = buf[4 + i]
-                repeat(4 + len) { buf.removeAt(0) }
-                frames.add(payload)
+            var cursor = 0
+            while (size - cursor >= 4) {
+                val len = ((buf[cursor].toInt() and 0xFF) shl 24) or
+                    ((buf[cursor + 1].toInt() and 0xFF) shl 16) or
+                    ((buf[cursor + 2].toInt() and 0xFF) shl 8) or
+                    (buf[cursor + 3].toInt() and 0xFF)
+                // Garbage length (negative top bit or absurdly large): the
+                // stream is desynced — drop everything buffered and resync.
+                if (len < 0 || len > MAX_FRAME) {
+                    cursor = size
+                    break
+                }
+                if (size - cursor < 4 + len) break
+                frames.add(buf.copyOfRange(cursor + 4, cursor + 4 + len))
+                cursor += 4 + len
             }
+            compact(cursor)
             return frames
         }
+
+        private fun append(data: ByteArray) {
+            if (size + data.size > buf.size) {
+                var newCapacity = buf.size
+                while (newCapacity < size + data.size) newCapacity *= 2
+                buf = buf.copyOf(newCapacity)
+            }
+            System.arraycopy(data, 0, buf, size, data.size)
+            size += data.size
+        }
+
+        /** Drop the first [consumed] bytes, keeping any trailing partial frame. */
+        private fun compact(consumed: Int) {
+            if (consumed <= 0) return
+            val remaining = size - consumed
+            if (remaining > 0) System.arraycopy(buf, consumed, buf, 0, remaining)
+            size = remaining
+        }
     }
+
+    private const val INITIAL_CAPACITY = 64 * 1024
+    private const val MAX_FRAME = 1 shl 22
 }
