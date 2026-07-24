@@ -70,6 +70,20 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         sendFrame(JSONObject(map).toString().toByteArray(Charsets.UTF_8))
     }
 
+    /**
+     * Panel metrics changed (rotation): update what the next `hello` reports
+     * and, if a Mac is connected right now, resend `hello` immediately so it
+     * rebuilds its virtual display without waiting for a reconnect — mirrors
+     * `PhoneReceiver.setOrientation`'s mid-session `sendHello`.
+     */
+    fun updatePanel(wide: Int, high: Int, newScale: Double) {
+        if (wide == pixelsWide && high == pixelsHigh && newScale == scale) return
+        pixelsWide = wide
+        pixelsHigh = high
+        scale = newScale
+        if (outputStream != null) sendHello()
+    }
+
     private fun acceptLoop() {
         try {
             val server = ServerSocket(port)
