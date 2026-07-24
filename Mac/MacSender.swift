@@ -221,12 +221,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // encodes in parallel inside the same session.
     //
     // Capping pendingEncodes at 1 enforces “latest frame wins” on the encoder:
-    // skip captures while an encode is in flight (enc drops), then feed the next
-    // fresh buffer when the callback clears the slot. The H.264 reference chain
-    // stays valid (pre-encode skip → normal P-frame n→n+2); we do NOT force
-    // keyframes on enc drops.
+    // while an encode is in flight, newer captures replace `heldLatest*` instead
+    // of being discarded; when the slot frees we encode that newest buffer.
+    // (Dropping without a hold encoded the *oldest* queued SCK frame on idle→
+    // wake bursts — the Chromebook first-move lag.) H.264 refs stay valid
+    // (pre-encode skip → P-frame n→n+2); we do NOT force keyframes on enc drops.
     private var pendingEncodes = 0
     private let maxPendingEncodes = 1
+    /// Newest capture waiting for a free encode/send slot (latest-wins hold).
+    private var heldLatestBuffer: CVPixelBuffer?
+    private var heldLatestPTS: CMTime = .invalid
+    /// Last PTS submitted to VT — keep-alive / held frames must stay monotonic.
+    private var lastEncodedPTS: CMTime = .invalid
+    /// Re-encodes the last static frame while SCK is quiet so the encoder,
+    /// TCP path, and decoder stay warm for the next pointer move.
+    private var keepAliveTimer: DispatchSourceTimer?
+    private var lastKeepAliveAt = Date.distantPast
 
     // ── Outstanding send backpressure (maxPendingSends = 3) ──────────────────
     //
@@ -610,9 +620,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         config.pixelFormat = UserDefaults.standard.string(forKey: "pixfmt") == "bgra"
             ? kCVPixelFormatType_32BGRA
             : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-        // One buffer is held permanently (keyframe replay) and one sits in
-        // the encoder for ~13ms — headroom prevents SCK starvation drops.
-        config.queueDepth = 8
+        // Shallow queue: depth 8 buffered ~8 stale frames on idle→wake bursts
+        // (first encoded frame was the oldest). 3 covers keyframe-replay hold +
+        // one in-flight encode without multi-frame lag.
+        config.queueDepth = 3
         config.showsCursor = !localCursor
 
         encodeFrameRate = frameRate
@@ -625,7 +636,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         captureDisplayID = display.displayID
         lastCursorPNGHash = 0      // rotation rebuilds: re-send the sprite
         lastCursorSent = (-1, -1, false)
+        heldLatestBuffer = nil
+        heldLatestPTS = .invalid
+        lastEncodedPTS = .invalid
         startCursorEcho()
+        startKeepAlive()
         Log.info("capture started: \(pixelsWide)x\(pixelsHigh)@\(frameRate) display \(display.displayID) mode \(mode.rawValue) localCursor=\(localCursor)")
         let kind = lastHello?.kind ?? "device"
         await status("\(mode == .extend ? "Extending to" : "Mirroring to") \(kind) (\(pixelsWide)×\(pixelsHigh))")
@@ -637,6 +652,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         cursorTimer = nil
         cursorImageTimer?.cancel()
         cursorImageTimer = nil
+        keepAliveTimer?.cancel()
+        keepAliveTimer = nil
         stream?.stopCapture { _ in }
         stream = nil
         connection?.cancel()
@@ -648,6 +665,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // Unblock a start() that is still waiting for the hello.
             self?.helloContinuation?.resume(throwing: CancellationError())
             self?.helloContinuation = nil
+            self?.heldLatestBuffer = nil
+            self?.heldLatestPTS = .invalid
         }
     }
 
@@ -675,6 +694,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.pendingSends = 0
             self.pipelineLock.lock()
             self.pendingEncodes = 0
+            self.heldLatestBuffer = nil
+            self.heldLatestPTS = .invalid
             self.pipelineLock.unlock()
             self.connect()
         }
@@ -948,6 +969,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         pendingSends = 0
         pipelineLock.lock()
         pendingEncodes = 0
+        heldLatestBuffer = nil
+        heldLatestPTS = .invalid
         pipelineLock.unlock()
         queue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             // Generation-guarded so a switchTransport (or another reconnect)
@@ -1180,6 +1203,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                let x = obj["x"] as? Double,
                let y = obj["y"] as? Double {
                 inputInjector?.handleTouch(phase: phase, x: x, y: y)
+                // Wake a cold encode path immediately: SCK may not emit for
+                // another frame after idle, and the first burst used to encode
+                // a stale queued buffer. Kick the last frame now so the next
+                // real capture rides a warm encoder.
+                if Date().timeIntervalSince(lastCaptureAt) > 0.08 {
+                    encodeHeldOrKeepAlive(forceKeepAlive: true)
+                }
                 if let t = obj["t"] as? Double {
                     let delta = Date().timeIntervalSince1970 * 1000 - t
                     if delta > -50, delta < 1000 {
@@ -1191,6 +1221,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         case "scroll":
             if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
                 inputInjector?.handleScroll(dx: dx, dy: dy)
+                if Date().timeIntervalSince(lastCaptureAt) > 0.08 {
+                    encodeHeldOrKeepAlive(forceKeepAlive: true)
+                }
             }
         case "kf":
             // The phone's decoder lost sync (e.g. it attached mid-GOP and
@@ -1284,10 +1317,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
         // No receiver, or a pipeline stage is backed up: skip this frame.
         guard connectionReady else { return }
-        if shouldDropFrame(reason: "pending_encode") { return }  // encoder busy
-        if shouldDropFrame(reason: "pending_sends") { return }   // TCP send queue full
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        // Latest-wins: when encode/send is busy, replace the held buffer so
+        // the free slot encodes the newest frame — not the oldest SCK queue entry.
+        if shouldDropFrame(reason: "pending_encode") || shouldDropFrame(reason: "pending_sends") {
+            holdLatest(pixelBuffer, pts: pts)
+            return
+        }
 
-        encode(pixelBuffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        encode(pixelBuffer, pts: pts)
     }
 
     /// Drop when encode or send pipeline is busy.
@@ -1320,8 +1358,66 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return true
     }
 
+    private func holdLatest(_ pixelBuffer: CVPixelBuffer, pts: CMTime) {
+        pipelineLock.lock()
+        heldLatestBuffer = pixelBuffer
+        heldLatestPTS = pts
+        pipelineLock.unlock()
+    }
+
+    /// If a newer capture was held while encode/send was busy, submit it now.
+    private func encodeHeldIfReady() {
+        pipelineLock.lock()
+        let busy = pendingEncodes >= maxPendingEncodes || pendingSends >= maxPendingSends
+        guard !busy, let buffer = heldLatestBuffer else {
+            pipelineLock.unlock()
+            return
+        }
+        let pts = heldLatestPTS
+        heldLatestBuffer = nil
+        heldLatestPTS = .invalid
+        pipelineLock.unlock()
+        encode(buffer, pts: pts)
+    }
+
+    // MARK: - Idle keep-alive
+
+    private func startKeepAlive() {
+        keepAliveTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        // ~10 Hz is enough to keep VT + the Chromebook decoder warm without
+        // noticeable idle bandwidth (static P-frames compress to almost nothing).
+        timer.schedule(deadline: .now() + 0.1, repeating: .milliseconds(100))
+        timer.setEventHandler { [weak self] in self?.encodeHeldOrKeepAlive(forceKeepAlive: false) }
+        timer.resume()
+        keepAliveTimer = timer
+    }
+
+    /// Prefer a held latest capture; otherwise re-encode the last static frame
+    /// when SCK has been quiet (content-change capture goes idle on a still desk).
+    private func encodeHeldOrKeepAlive(forceKeepAlive: Bool) {
+        guard connectionReady, !stopped else { return }
+        pipelineLock.lock()
+        if heldLatestBuffer != nil {
+            pipelineLock.unlock()
+            encodeHeldIfReady()
+            return
+        }
+        let busy = pendingEncodes >= maxPendingEncodes || pendingSends >= maxPendingSends
+        pipelineLock.unlock()
+        guard !busy else { return }
+        let quiet = Date().timeIntervalSince(lastCaptureAt) > 0.09
+        guard forceKeepAlive || quiet, let buffer = lastPixelBuffer else { return }
+        // Input can arrive at >100 Hz; don't re-encode the same static frame
+        // on every hover sample — once per ~50ms is enough to warm the path.
+        if Date().timeIntervalSince(lastKeepAliveAt) < 0.05 { return }
+        lastKeepAliveAt = Date()
+        encode(buffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
+    }
+
     private func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime) {
         guard let encoder else { return }
+        let submitPTS = monotonicPTS(preferred: pts)
         pipelineLock.lock()
         pendingEncodes += 1
         pipelineLock.unlock()
@@ -1334,31 +1430,41 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let submitStatus = VTCompressionSessionEncodeFrame(
             encoder,
             imageBuffer: pixelBuffer,
-            presentationTimeStamp: pts,
+            presentationTimeStamp: submitPTS,
             duration: .invalid,
             frameProperties: frameProperties,
             infoFlagsOut: nil
         ) { [weak self] status, _, buffer in
             guard let self else { return }
-            defer {
-                self.pipelineLock.lock()
-                self.pendingEncodes = max(0, self.pendingEncodes - 1)
-                self.pipelineLock.unlock()
-            }
-            guard status == noErr, let buffer else { return }
-            if let data = self.annexB(from: buffer) {
+            self.pipelineLock.lock()
+            self.pendingEncodes = max(0, self.pendingEncodes - 1)
+            self.pipelineLock.unlock()
+            if status == noErr, let buffer, let data = self.annexB(from: buffer) {
                 let sndMs = Int64(Date().timeIntervalSince1970 * 1000)
                 var framed = Data("{\"cap\":\(capturedAtMs),\"snd\":\(sndMs)}".utf8)
                 framed.append(data)
                 self.sendFramed(framed)
             }
+            // Encode the newest held capture immediately — do not wait for SCK.
+            self.queue.async { self.encodeHeldIfReady() }
         }
         if submitStatus != noErr {
             pipelineLock.lock()
             pendingEncodes = max(0, pendingEncodes - 1)
             pipelineLock.unlock()
             Log.info("VTCompressionSessionEncodeFrame failed: \(submitStatus)")
+            queue.async { self.encodeHeldIfReady() }
         }
+    }
+
+    /// VT requires strictly increasing PTS; keep-alive / held frames may share a clock.
+    private func monotonicPTS(preferred: CMTime) -> CMTime {
+        var pts = preferred.isValid ? preferred : CMClockGetTime(CMClockGetHostTimeClock())
+        if lastEncodedPTS.isValid && CMTimeCompare(pts, lastEncodedPTS) <= 0 {
+            pts = CMTimeAdd(lastEncodedPTS, CMTime(value: 1, timescale: 600))
+        }
+        lastEncodedPTS = pts
+        return pts
     }
 
     // MARK: - H.264 -> Annex B
@@ -1461,6 +1567,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             self.framesSent += 1
             self.bytesSent += frame.count
+            // A freed send slot may unblock a held latest frame.
+            self.queue.async { self.encodeHeldIfReady() }
             // Report stats roughly once a second.
             let elapsed = Date().timeIntervalSince(self.statsWindowStart)
             if elapsed >= 1.0 {
