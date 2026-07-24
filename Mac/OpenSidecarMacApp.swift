@@ -401,14 +401,18 @@ final class SenderController: ObservableObject {
         return false
     }
 
-    /// An attached, auto-connectable USB / ADB device is (about to be) dialed
-    /// over the cable — its WiFi service must not be grabbed in the launch race.
+    /// An attached physical USB / ADB-cable device is (about to be) dialed —
+    /// its WiFi service must not be grabbed in the launch race. Network ADB
+    /// (`adb connect host:port`) is NOT a cable: treating it as one blocked
+    /// Chromebook Bonjour auto-connect while a half-open forward session sat
+    /// waiting for the receiver app.
     private func cabled(_ result: NWBrowser.Result) -> Bool {
         if usbDevices.contains(where: {
             sameDevice(result, $0) && !usbDisabled.contains("usb:\($0.udid)")
         }) { return true }
         return androidDevices.contains(where: {
             $0.authorized
+                && !$0.isNetwork
                 && !adbDisabled.contains(ConnectionTarget.androidUsb(serial: $0.serial).sessionID)
                 && sameAndroidDevice(result, serial: $0.serial)
         })
@@ -439,12 +443,15 @@ final class SenderController: ObservableObject {
                 return name != nil && (name == s.wifiServiceName || name == s.name)
             }
             if case .androidUsb(let serial) = s.target {
+                // Network ADB must not claim the WiFi row — it races Bonjour
+                // and leaves Chromebooks needing a manual Connect click.
+                if serial.contains(":") { return false }
                 return sameAndroidDevice(result, serial: serial)
                     || (txtID(of: result).map { installIDByAdbSerial[serial] == $0 } ?? false)
                     || (s.deviceID != nil && s.deviceID == txtID(of: result))
             }
-            // WiFi-origin session migrated onto ADB — still covers this service.
-            if let serial = s.adbSerial, s.onUSB {
+            // WiFi-origin session migrated onto physical ADB — still covers.
+            if let serial = s.adbSerial, s.onUSB, !serial.contains(":") {
                 return sameAndroidDevice(result, serial: serial)
                     || (s.deviceID != nil && s.deviceID == txtID(of: result))
             }
@@ -489,10 +496,11 @@ final class SenderController: ObservableObject {
                 connect(to: .usb(udid: device.udid))
             }
         }
-        // Android over ADB (USB cable or `adb connect`): prefer migrating a
-        // live WiFi session onto the forward tunnel (iOS cable-upgrade parity);
-        // otherwise auto-connect authorized serials the user hasn't opted out of.
-        for device in androidDevices where device.authorized {
+        // Android over a physical USB cable (adb serial without host:port):
+        // prefer migrating a live WiFi session onto the forward tunnel; else
+        // auto-connect. Network `adb connect` peers are left alone here —
+        // Bonjour WiFi is the right auto path for those (Chromebooks).
+        for device in androidDevices where device.authorized && !device.isNetwork {
             let target = ConnectionTarget.androidUsb(serial: device.serial)
             if let covering = activeSession(coveringAndroid: device.serial) {
                 upgradeToAndroidUSB(covering, serial: device.serial)
@@ -593,8 +601,10 @@ final class SenderController: ObservableObject {
     }
 
     /// ADB appears while the device streams over WiFi: migrate onto
-    /// `adb forward` (phones over USB cable, or Chromebook via `adb connect`).
+    /// `adb forward` for a **physical USB** serial. Network `adb connect`
+    /// is skipped — direct Bonjour is better than tunneling through adbd.
     private func upgradeToAndroidUSB(_ session: DeviceSession, serial: String) {
+        if serial.contains(":") { return }
         // Already on this ADB tunnel — nothing to do.
         if session.onUSB, session.adbSerial == serial { return }
         guard let portNum = UInt16(port) else { return }
