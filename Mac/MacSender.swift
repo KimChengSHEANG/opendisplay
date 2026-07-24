@@ -115,7 +115,7 @@ enum DisplayResolution: String, CaseIterable, Identifiable {
         switch self {
         case .largerText: return 0.75
         case .standard: return 1.0
-        case .moreSpace: return 1.25
+        case .moreSpace: return 1.35
         case .extraSpace: return 1.5
         }
     }
