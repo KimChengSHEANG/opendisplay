@@ -27,8 +27,10 @@ enum CaptureMode: String {
 /// Capture-resolution / bitrate trade-off. The virtual display always runs at
 /// native size — only the captured/encoded stream is scaled, so lower presets
 /// cut encode, transmit, and decode time at the cost of sharpness.
-enum StreamQuality: String, CaseIterable {
+enum StreamQuality: String, CaseIterable, Identifiable {
     case best, balanced, fast
+
+    var id: String { rawValue }
 
     var scale: Double {
         switch self {
@@ -60,6 +62,36 @@ enum StreamQuality: String, CaseIterable {
         case .balanced: return "75% capture resolution — noticeably lower latency, slight softness."
         case .fast: return "Half resolution — lowest latency and bandwidth, visibly softer. Good for WiFi."
         }
+    }
+
+    /// Per-device default when nothing is saved yet. Chromebook prefers Balanced
+    /// (software decode); others fall back to the global Default bandwidth.
+    static func `default`(forDeviceKind kind: String?, global: StreamQuality) -> StreamQuality {
+        if kind == "Chromebook" { return .balanced }
+        return global
+    }
+}
+
+/// Capture / encode frame-rate target for a session.
+enum StreamFrameRate: Int, CaseIterable, Identifiable {
+    case fps60 = 60
+    case fps30 = 30
+    case fps15 = 15
+
+    var id: Int { rawValue }
+
+    var label: String { "\(rawValue) fps" }
+
+    var explanation: String {
+        switch self {
+        case .fps60: return "Smoothest motion; highest encode and decode load."
+        case .fps30: return "Good balance for WiFi and Chromebook software decode."
+        case .fps15: return "Lowest bandwidth and CPU; fine for mostly-static desktops."
+        }
+    }
+
+    static func `default`(forDeviceKind kind: String?) -> StreamFrameRate {
+        kind == "Chromebook" ? .fps30 : .fps60
     }
 }
 
@@ -165,8 +197,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private let mode: CaptureMode
     private let quality: StreamQuality
     private let displayResolution: DisplayResolution
-    /// Bitrate / fps applied to the live encoder — may be tighter than
-    /// [quality] for Chromebook (see `capturePlan`).
+    private let frameRatePreset: StreamFrameRate
+    /// Bitrate / fps applied to the live encoder (from quality + frame-rate preset;
+    /// Chromebook may still clamp long-edge size in `capturePlan`).
     private var encodeBitrate: Int = 18_000_000
     private var encodeFrameRate: Int = 60
     // Stable per-device serial for the virtual display, so macOS can tell
@@ -251,9 +284,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // capture→encode→stream→display latency (~30ms perceived). Instead we
     // hide it from capture and stream its position on the control channel —
     // the phone draws it locally on the ~2ms path the touches use.
-    // Escape hatch: `defaults write sh.peet.opensidecar.mac localCursor -bool false`.
-    private let localCursor = UserDefaults.standard.object(forKey: "localCursor") == nil
-        || UserDefaults.standard.bool(forKey: "localCursor")
+    // Per-session from the UI; global kill-switch still honored:
+    // `defaults write … localCursor -bool false`.
+    private let localCursor: Bool
     private var cursorTimer: DispatchSourceTimer?
     private var cursorImageTimer: DispatchSourceTimer?
     private var lastCursorSent: (x: Double, y: Double, visible: Bool) = (-1, -1, false)
@@ -281,6 +314,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     init(transport: SenderTransport, name: String, mode: CaptureMode,
          quality: StreamQuality = .best,
          displayResolution: DisplayResolution = .standard,
+         frameRate: StreamFrameRate = .fps60,
+         localCursor: Bool = true,
          displaySerial: UInt32 = 0x0001,
          awaitingWake: Bool = false) {
         self.transport = transport
@@ -288,6 +323,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         self.mode = mode
         self.quality = quality
         self.displayResolution = displayResolution
+        self.frameRatePreset = frameRate
+        // Global defaults-write kill-switch still wins over the per-device toggle.
+        let globalCursor = UserDefaults.standard.object(forKey: "localCursor") == nil
+            || UserDefaults.standard.bool(forKey: "localCursor")
+        self.localCursor = localCursor && globalCursor
         self.displaySerial = displaySerial
         self.awaitingWake = awaitingWake
         super.init()
@@ -327,7 +367,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // SCDisplay reports points; capture at point resolution for M1.
             let captureW = (Int(Double(display.width) * quality.scale)) & ~1
             let captureH = (Int(Double(display.height) * quality.scale)) & ~1
-            try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
+            encodeBitrate = quality.bitrate
+            encodeFrameRate = frameRatePreset.rawValue
+            try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH,
+                                   frameRate: frameRatePreset.rawValue)
 
         case .extend:
             // awaitingWake is queue-confined — read it there before surfacing.
@@ -434,7 +477,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // display itself stays native so window layout is unaffected.
         let plan = Self.capturePlan(
             pointsWide: pointsWide, pointsHigh: pointsHigh,
-            quality: quality, deviceKind: info.device
+            quality: quality, frameRate: frameRatePreset, deviceKind: info.device
         )
         encodeBitrate = plan.bitrate
         encodeFrameRate = plan.fps
@@ -455,22 +498,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     /// Capture/encode size for the virtual display framebuffer.
-    /// Chromebook uses software AVC (VDA greens); keep encode under ~1600p@30
-    /// so OMX.google stays interactive without the soft 720p upscale.
+    /// Chromebook software AVC stays interactive with a long-edge cap; bandwidth
+    /// and fps come from the per-device presets (no longer hard-forced).
     private static func capturePlan(
         pointsWide: Int, pointsHigh: Int,
-        quality: StreamQuality, deviceKind: String?
+        quality: StreamQuality, frameRate: StreamFrameRate, deviceKind: String?
     ) -> (width: Int, height: Int, bitrate: Int, fps: Int) {
-        var scale = quality.scale
-        var bitrate = quality.bitrate
-        var fps = 60
-        var maxLongEdge = Int.max
-        if deviceKind == "Chromebook" {
-            scale = min(scale, 0.75)
-            bitrate = min(bitrate, 10_000_000)
-            fps = 30
-            maxLongEdge = 1600
-        }
+        let scale = quality.scale
+        let bitrate = quality.bitrate
+        let fps = frameRate.rawValue
+        let maxLongEdge = deviceKind == "Chromebook" ? 1600 : Int.max
         var width = max(2, Int(Double(pointsWide * 2) * scale) & ~1)
         var height = max(2, Int(Double(pointsHigh * 2) * scale) & ~1)
         let longEdge = max(width, height)

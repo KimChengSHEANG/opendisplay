@@ -203,6 +203,21 @@ final class SenderController: ObservableObject {
         UserDefaults.standard.dictionary(forKey: "resolutionByDevice") as? [String: String] ?? [:] {
         didSet { UserDefaults.standard.set(resolutionByDevice, forKey: "resolutionByDevice") }
     }
+    /// Per-device bandwidth preset (`StreamQuality` raw value).
+    @Published private var qualityByDevice: [String: String] =
+        UserDefaults.standard.dictionary(forKey: "qualityByDevice") as? [String: String] ?? [:] {
+        didSet { UserDefaults.standard.set(qualityByDevice, forKey: "qualityByDevice") }
+    }
+    /// Per-device frame rate (`StreamFrameRate` raw Int as String).
+    @Published private var frameRateByDevice: [String: String] =
+        UserDefaults.standard.dictionary(forKey: "frameRateByDevice") as? [String: String] ?? [:] {
+        didSet { UserDefaults.standard.set(frameRateByDevice, forKey: "frameRateByDevice") }
+    }
+    /// Per-device local cursor echo ("1" / "0"). Absent → On.
+    @Published private var localCursorByDevice: [String: String] =
+        UserDefaults.standard.dictionary(forKey: "localCursorByDevice") as? [String: String] ?? [:] {
+        didSet { UserDefaults.standard.set(localCursorByDevice, forKey: "localCursorByDevice") }
+    }
 
     var running: Bool { !sessions.isEmpty }
 
@@ -778,83 +793,206 @@ final class SenderController: ObservableObject {
     }
 
     /// Preference key for a live session — install id once known, else session id.
-    func resolutionKey(for session: DeviceSession) -> String {
+    func devicePrefKey(for session: DeviceSession) -> String {
         session.deviceID ?? session.id
     }
 
+    // MARK: - Per-device stream prefs (resolution / bandwidth / fps / cursor)
+
     func resolution(for session: DeviceSession) -> DisplayResolution {
-        resolution(forKey: resolutionKey(for: session), kind: session.deviceKind)
+        resolvedResolution(keys: [devicePrefKey(for: session)], kind: session.deviceKind)
     }
 
     func resolution(for entry: DeviceEntry) -> DisplayResolution {
-        if let session = session(for: entry) {
-            return resolution(for: session)
-        }
-        if let target = entry.preferredTarget {
-            return resolvedResolution(for: target)
-        }
-        return resolution(forKey: entry.id, kind: entry.kindHint)
+        if let session = session(for: entry) { return resolution(for: session) }
+        if let target = entry.preferredTarget { return resolvedResolution(for: target) }
+        return resolvedResolution(keys: [entry.id], kind: entry.kindHint)
     }
 
-    private func resolution(forKey key: String, kind: String?) -> DisplayResolution {
-        if let raw = resolutionByDevice[key], let value = DisplayResolution(rawValue: raw) {
-            return value
-        }
-        return DisplayResolution.default(forDeviceKind: kind)
+    func quality(for session: DeviceSession) -> StreamQuality {
+        resolvedQuality(keys: [devicePrefKey(for: session)], kind: session.deviceKind)
     }
 
-    /// Persist a per-device display size and rebuild that session so the
-    /// virtual display picks up the new point size immediately.
+    func quality(for entry: DeviceEntry) -> StreamQuality {
+        if let session = session(for: entry) { return quality(for: session) }
+        if let target = entry.preferredTarget { return resolvedQuality(for: target) }
+        return resolvedQuality(keys: [entry.id], kind: entry.kindHint)
+    }
+
+    func frameRate(for session: DeviceSession) -> StreamFrameRate {
+        resolvedFrameRate(keys: [devicePrefKey(for: session)], kind: session.deviceKind)
+    }
+
+    func frameRate(for entry: DeviceEntry) -> StreamFrameRate {
+        if let session = session(for: entry) { return frameRate(for: session) }
+        if let target = entry.preferredTarget { return resolvedFrameRate(for: target) }
+        return resolvedFrameRate(keys: [entry.id], kind: entry.kindHint)
+    }
+
+    func localCursor(for session: DeviceSession) -> Bool {
+        resolvedLocalCursor(keys: [devicePrefKey(for: session)])
+    }
+
+    func localCursor(for entry: DeviceEntry) -> Bool {
+        if let session = session(for: entry) { return localCursor(for: session) }
+        if let target = entry.preferredTarget { return resolvedLocalCursor(for: target) }
+        return resolvedLocalCursor(keys: [entry.id])
+    }
+
     func setResolution(_ preset: DisplayResolution, for session: DeviceSession) {
-        let current = resolution(for: session)
-        let key = resolutionKey(for: session)
-        resolutionByDevice[key] = preset.rawValue
-        if let installID = session.deviceID {
-            resolutionByDevice[installID] = preset.rawValue
-        }
-        // Also stamp transport keys so a later Connect on the same row hits
-        // the same preference before hello arrives.
-        for key in resolutionLookupKeys(for: session.target) {
-            resolutionByDevice[key] = preset.rawValue
-        }
-        guard current != preset else { return }
-        let target = session.target
-        disconnect(session)
-        connect(to: target, userInitiated: true)
+        applyDevicePref(preset.rawValue, current: resolution(for: session).rawValue,
+                        get: { resolutionByDevice }, set: { resolutionByDevice = $0 },
+                        session: session)
     }
 
-    /// Save preference for a device-list row; reconnects if that device is live.
     func setResolution(_ preset: DisplayResolution, for entry: DeviceEntry) {
         if let session = session(for: entry) {
             setResolution(preset, for: session)
             return
         }
-        resolutionByDevice[entry.id] = preset.rawValue
+        stamp(get: { resolutionByDevice }, set: { resolutionByDevice = $0 },
+              value: preset.rawValue, entry: entry)
+    }
+
+    func setQuality(_ preset: StreamQuality, for session: DeviceSession) {
+        applyDevicePref(preset.rawValue, current: quality(for: session).rawValue,
+                        get: { qualityByDevice }, set: { qualityByDevice = $0 },
+                        session: session)
+    }
+
+    func setQuality(_ preset: StreamQuality, for entry: DeviceEntry) {
+        if let session = session(for: entry) {
+            setQuality(preset, for: session)
+            return
+        }
+        stamp(get: { qualityByDevice }, set: { qualityByDevice = $0 },
+              value: preset.rawValue, entry: entry)
+    }
+
+    func setFrameRate(_ preset: StreamFrameRate, for session: DeviceSession) {
+        applyDevicePref(String(preset.rawValue), current: String(frameRate(for: session).rawValue),
+                        get: { frameRateByDevice }, set: { frameRateByDevice = $0 },
+                        session: session)
+    }
+
+    func setFrameRate(_ preset: StreamFrameRate, for entry: DeviceEntry) {
+        if let session = session(for: entry) {
+            setFrameRate(preset, for: session)
+            return
+        }
+        stamp(get: { frameRateByDevice }, set: { frameRateByDevice = $0 },
+              value: String(preset.rawValue), entry: entry)
+    }
+
+    func setLocalCursor(_ enabled: Bool, for session: DeviceSession) {
+        let value = enabled ? "1" : "0"
+        applyDevicePref(value, current: localCursor(for: session) ? "1" : "0",
+                        get: { localCursorByDevice }, set: { localCursorByDevice = $0 },
+                        session: session)
+    }
+
+    func setLocalCursor(_ enabled: Bool, for entry: DeviceEntry) {
+        if let session = session(for: entry) {
+            setLocalCursor(enabled, for: session)
+            return
+        }
+        stamp(get: { localCursorByDevice }, set: { localCursorByDevice = $0 },
+              value: enabled ? "1" : "0", entry: entry)
+    }
+
+    /// Persist a string pref under session + install + transport keys; reconnect if changed.
+    private func applyDevicePref(
+        _ value: String, current: String,
+        get: () -> [String: String], set: ([String: String]) -> Void,
+        session: DeviceSession
+    ) {
+        var store = get()
+        let key = devicePrefKey(for: session)
+        store[key] = value
+        if let installID = session.deviceID { store[installID] = value }
+        for k in preferenceLookupKeys(for: session.target) { store[k] = value }
+        set(store)
+        guard current != value else { return }
+        let target = session.target
+        disconnect(session)
+        connect(to: target, userInitiated: true)
+    }
+
+    private func stamp(
+        get: () -> [String: String], set: ([String: String]) -> Void,
+        value: String, entry: DeviceEntry
+    ) {
+        var store = get()
+        store[entry.id] = value
         if let target = entry.usbTarget {
-            for key in resolutionLookupKeys(for: target) {
-                resolutionByDevice[key] = preset.rawValue
-            }
+            for k in preferenceLookupKeys(for: target) { store[k] = value }
         }
         if let target = entry.wifiTarget {
-            for key in resolutionLookupKeys(for: target) {
-                resolutionByDevice[key] = preset.rawValue
-            }
+            for k in preferenceLookupKeys(for: target) { store[k] = value }
         }
+        set(store)
     }
 
     private func resolvedResolution(for target: ConnectionTarget) -> DisplayResolution {
-        let keys = resolutionLookupKeys(for: target)
+        let keys = preferenceLookupKeys(for: target)
+        let kind = keys.compactMap { knownReceiverKinds[$0] }.first ?? kindHint(for: target)
+        return resolvedResolution(keys: keys, kind: kind)
+    }
+
+    private func resolvedResolution(keys: [String], kind: String?) -> DisplayResolution {
         for key in keys {
             if let raw = resolutionByDevice[key], let value = DisplayResolution(rawValue: raw) {
                 return value
             }
         }
-        let kind = keys.compactMap { knownReceiverKinds[$0] }.first
-            ?? kindHint(for: target)
         return DisplayResolution.default(forDeviceKind: kind)
     }
 
-    private func resolutionLookupKeys(for target: ConnectionTarget) -> [String] {
+    private func resolvedQuality(for target: ConnectionTarget) -> StreamQuality {
+        let keys = preferenceLookupKeys(for: target)
+        let kind = keys.compactMap { knownReceiverKinds[$0] }.first ?? kindHint(for: target)
+        return resolvedQuality(keys: keys, kind: kind)
+    }
+
+    private func resolvedQuality(keys: [String], kind: String?) -> StreamQuality {
+        for key in keys {
+            if let raw = qualityByDevice[key], let value = StreamQuality(rawValue: raw) {
+                return value
+            }
+        }
+        return StreamQuality.default(forDeviceKind: kind, global: quality)
+    }
+
+    private func resolvedFrameRate(for target: ConnectionTarget) -> StreamFrameRate {
+        let keys = preferenceLookupKeys(for: target)
+        let kind = keys.compactMap { knownReceiverKinds[$0] }.first ?? kindHint(for: target)
+        return resolvedFrameRate(keys: keys, kind: kind)
+    }
+
+    private func resolvedFrameRate(keys: [String], kind: String?) -> StreamFrameRate {
+        for key in keys {
+            if let raw = frameRateByDevice[key], let intVal = Int(raw),
+               let value = StreamFrameRate(rawValue: intVal) {
+                return value
+            }
+        }
+        return StreamFrameRate.default(forDeviceKind: kind)
+    }
+
+    private func resolvedLocalCursor(for target: ConnectionTarget) -> Bool {
+        resolvedLocalCursor(keys: preferenceLookupKeys(for: target))
+    }
+
+    private func resolvedLocalCursor(keys: [String]) -> Bool {
+        for key in keys {
+            if let raw = localCursorByDevice[key] {
+                return raw == "1" || raw.lowercased() == "true"
+            }
+        }
+        return true
+    }
+
+    private func preferenceLookupKeys(for target: ConnectionTarget) -> [String] {
         var keys: [String] = [target.sessionID]
         switch target {
         case .usb(let udid?):
@@ -882,6 +1020,16 @@ final class SenderController: ObservableObject {
         case .usb:
             return nil
         }
+    }
+
+    private func migratePref(
+        _ keyPath: ReferenceWritableKeyPath<SenderController, [String: String]>,
+        from old: String, to new: String
+    ) {
+        var store = self[keyPath: keyPath]
+        guard store[new] == nil, let raw = store[old] else { return }
+        store[new] = raw
+        self[keyPath: keyPath] = store
     }
 
     func connect(to target: ConnectionTarget, userInitiated: Bool = false,
@@ -962,8 +1110,14 @@ final class SenderController: ObservableObject {
 
         let name = label(for: target)
         let displayResolution = resolvedResolution(for: target)
+        let streamQuality = resolvedQuality(for: target)
+        let streamFrameRate = resolvedFrameRate(for: target)
+        let streamLocalCursor = resolvedLocalCursor(for: target)
         let sender = MacSender(transport: transport, name: name, mode: mode,
-                               quality: quality, displayResolution: displayResolution,
+                               quality: streamQuality,
+                               displayResolution: displayResolution,
+                               frameRate: streamFrameRate,
+                               localCursor: streamLocalCursor,
                                displaySerial: Self.displaySerial(for: id),
                                awaitingWake: awaitingWake)
         let session = DeviceSession(id: id, target: target, name: name, sender: sender)
@@ -978,11 +1132,12 @@ final class SenderController: ObservableObject {
             guard let self, let session else { return }
             session.deviceID = info.id
             session.deviceKind = info.device
-            // Migrate a session-id preference onto the durable install id.
-            if let installID = info.id,
-               self.resolutionByDevice[installID] == nil,
-               let raw = self.resolutionByDevice[session.id] {
-                self.resolutionByDevice[installID] = raw
+            // Migrate session-id preferences onto the durable install id.
+            if let installID = info.id {
+                self.migratePref(\.resolutionByDevice, from: session.id, to: installID)
+                self.migratePref(\.qualityByDevice, from: session.id, to: installID)
+                self.migratePref(\.frameRateByDevice, from: session.id, to: installID)
+                self.migratePref(\.localCursorByDevice, from: session.id, to: installID)
             }
             if let kind = info.device {
                 self.rememberReceiverKind(kind, installID: info.id, target: session.target)
@@ -1368,38 +1523,27 @@ struct ContentView: View {
                             SessionRow(title: entry.name, session: session,
                                        controller: controller)
                         } else {
-                            HStack(alignment: .firstTextBaseline) {
-                                Circle()
-                                    .fill(.secondary.opacity(0.5))
-                                    .frame(width: 9, height: 9)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(entry.name)
-                                    Text(entry.transportLabel)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Picker(
-                                    "Resolution",
-                                    selection: Binding(
-                                        get: { controller.resolution(for: entry) },
-                                        set: { controller.setResolution($0, for: entry) }
-                                    )
-                                ) {
-                                    ForEach(DisplayResolution.allCases) { option in
-                                        Text(option.label).tag(option)
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(alignment: .firstTextBaseline) {
+                                    Circle()
+                                        .fill(.secondary.opacity(0.5))
+                                        .frame(width: 9, height: 9)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(entry.name)
+                                        Text(entry.transportLabel)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    if let target = entry.preferredTarget {
+                                        Button("Connect") {
+                                            controller.connect(to: target, userInitiated: true)
+                                        }
+                                        .controlSize(.small)
                                     }
                                 }
-                                .labelsHidden()
-                                .pickerStyle(.menu)
-                                .controlSize(.small)
-                                .frame(width: 120)
-                                if let target = entry.preferredTarget {
-                                    Button("Connect") {
-                                        controller.connect(to: target, userInitiated: true)
-                                    }
-                                    .controlSize(.small)
-                                }
+                                DeviceStreamSettings(controller: controller, entry: entry)
+                                    .padding(.leading, 17)
                             }
                         }
                     }
@@ -1413,13 +1557,13 @@ struct ContentView: View {
                 .onChange(of: controller.mode) { controller.restartAll() }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Picker("Quality", selection: $controller.quality) {
-                        ForEach(StreamQuality.allCases, id: \.self) { q in
+                    Picker("Default bandwidth", selection: $controller.quality) {
+                        ForEach(StreamQuality.allCases) { q in
                             Text(q.label).tag(q)
                         }
                     }
                     .onChange(of: controller.quality) { controller.restartAll() }
-                    Text(controller.quality.explanation)
+                    Text("Used when a device has no Bandwidth override. \(controller.quality.explanation)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1565,7 +1709,7 @@ struct CheckForUpdatesView: View {
     }
 }
 
-/// One connected device: live status, throughput, resolution, reconnect + disconnect.
+/// One connected device: live status, throughput, stream options, reconnect + disconnect.
 struct SessionRow: View {
     let title: String
     @ObservedObject var session: DeviceSession
@@ -1580,13 +1724,6 @@ struct SessionRow: View {
             return .red
         }
         return .orange
-    }
-
-    private var resolutionBinding: Binding<DisplayResolution> {
-        Binding(
-            get: { controller.resolution(for: session) },
-            set: { controller.setResolution($0, for: session) }
-        )
     }
 
     var body: some View {
@@ -1618,25 +1755,122 @@ struct SessionRow: View {
                 Button("Disconnect") { controller.disconnect(session) }
                     .controlSize(.small)
             }
-            HStack(spacing: 8) {
-                Text("Resolution")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Picker("Resolution", selection: resolutionBinding) {
+            DeviceStreamSettings(controller: controller, session: session)
+                .padding(.leading, 17)
+        }
+    }
+}
+
+/// Per-device Resolution / Bandwidth / Frame rate / Local cursor pickers.
+struct DeviceStreamSettings: View {
+    let controller: SenderController
+    var session: DeviceSession?
+    var entry: SenderController.DeviceEntry?
+
+    private var resolution: Binding<DisplayResolution> {
+        Binding(
+            get: {
+                if let session { return controller.resolution(for: session) }
+                if let entry { return controller.resolution(for: entry) }
+                return .standard
+            },
+            set: {
+                if let session { controller.setResolution($0, for: session) }
+                else if let entry { controller.setResolution($0, for: entry) }
+            }
+        )
+    }
+
+    private var quality: Binding<StreamQuality> {
+        Binding(
+            get: {
+                if let session { return controller.quality(for: session) }
+                if let entry { return controller.quality(for: entry) }
+                return controller.quality
+            },
+            set: {
+                if let session { controller.setQuality($0, for: session) }
+                else if let entry { controller.setQuality($0, for: entry) }
+            }
+        )
+    }
+
+    private var frameRate: Binding<StreamFrameRate> {
+        Binding(
+            get: {
+                if let session { return controller.frameRate(for: session) }
+                if let entry { return controller.frameRate(for: entry) }
+                return .fps60
+            },
+            set: {
+                if let session { controller.setFrameRate($0, for: session) }
+                else if let entry { controller.setFrameRate($0, for: entry) }
+            }
+        )
+    }
+
+    private var localCursor: Binding<Bool> {
+        Binding(
+            get: {
+                if let session { return controller.localCursor(for: session) }
+                if let entry { return controller.localCursor(for: entry) }
+                return true
+            },
+            set: {
+                if let session { controller.setLocalCursor($0, for: session) }
+                else if let entry { controller.setLocalCursor($0, for: entry) }
+            }
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            settingRow("Resolution") {
+                Picker("Resolution", selection: resolution) {
                     ForEach(DisplayResolution.allCases) { option in
                         Text(option.label).tag(option)
                     }
                 }
+            }
+            settingRow("Bandwidth") {
+                Picker("Bandwidth", selection: quality) {
+                    ForEach(StreamQuality.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+            }
+            settingRow("Frame rate") {
+                Picker("Frame rate", selection: frameRate) {
+                    ForEach(StreamFrameRate.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+            }
+            settingRow("Local cursor") {
+                Picker("Local cursor", selection: localCursor) {
+                    Text("On").tag(true)
+                    Text("Off").tag(false)
+                }
+            }
+            Text(quality.wrappedValue.explanation)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+    }
+
+    @ViewBuilder
+    private func settingRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 78, alignment: .leading)
+            content()
                 .labelsHidden()
                 .pickerStyle(.menu)
                 .controlSize(.small)
-                .frame(maxWidth: 140, alignment: .leading)
-                Text(resolutionBinding.wrappedValue.explanation)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-            .padding(.leading, 17)
+                .frame(maxWidth: 160, alignment: .leading)
         }
     }
 }
