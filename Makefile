@@ -9,6 +9,7 @@
 
 CONFIG ?= Debug
 DD      = build
+APP     = $(DD)/Build/Products/$(CONFIG)/OpenDisplay.app
 
 .PHONY: all mac ios run clean generate
 
@@ -27,8 +28,14 @@ ios: generate
 		-destination 'generic/platform=iOS Simulator' \
 		-derivedDataPath $(DD) CODE_SIGNING_ALLOWED=NO build
 
+# Kill any live instance so we don't reuse a stale process, pause briefly so
+# WindowServer can release the previous virtual-display serial, then open.
 run: mac
-	./run.sh
+	@test -d "$(APP)" || (echo "Mac app missing at $(APP)"; exit 1)
+	-killall OpenDisplay 2>/dev/null
+	@sleep 0.3
+	open "$(APP)"
+	@echo "OpenDisplay running — logs at /tmp/opensidecar-mac.log."
 
 clean:
 	rm -rf $(DD)

@@ -159,7 +159,7 @@ TestFlight-equivalent for Android).
 ### Run (USB — recommended)
 
 1. Install + open **OpenDisplay** on the iPhone (it listens on port 9000).
-2. On the Mac, run `./run.sh` (or just open the app) — it talks to macOS's
+2. On the Mac, run `make run` (or just open the app) — it talks to macOS's
    built-in `usbmuxd` directly and auto-connects over the cable. No tunnel
    tools needed.
 3. Grant **Screen Recording** (for capture) and **Accessibility** (for touch)
