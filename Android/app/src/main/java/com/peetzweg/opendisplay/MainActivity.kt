@@ -6,7 +6,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.Configuration
+import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -15,27 +18,37 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
 import com.peetzweg.opendisplay.net.DiscoveryAdvertiser
 import com.peetzweg.opendisplay.session.InstallId
 import com.peetzweg.opendisplay.session.ReceiverSession
+import com.peetzweg.opendisplay.settings.AppSettings
 import com.peetzweg.opendisplay.sleep.HostSleepController
+import com.peetzweg.opendisplay.ui.IdleScreen
+import com.peetzweg.opendisplay.ui.PerfOverlay
+import com.peetzweg.opendisplay.ui.SettingsScreen
 import com.peetzweg.opendisplay.ui.StreamingScreen
+import com.peetzweg.opendisplay.ui.UpdateRequiredScreen
+import com.peetzweg.opendisplay.version.VersionGate
 import com.peetzweg.opendisplay.video.VideoDecoder
 import com.peetzweg.opendisplay.wire.WireMessage
 
 class MainActivity : ComponentActivity() {
     private var connected by mutableStateOf(false)
     private var hostDisplayOff by mutableStateOf(false)
+    private var showSettings by mutableStateOf(false)
+    private var deviceName by mutableStateOf("")
+    private var showAnalytics by mutableStateOf(false)
+    private var fps by mutableStateOf(0)
+    private var updateRequired by mutableStateOf<VersionGate.Update?>(null)
+    private var recommendedUpdate by mutableStateOf<VersionGate.Update?>(null)
+    private val versionGate = VersionGate()
     private var session: ReceiverSession? = null
     private var decoder: VideoDecoder? = null
     private var advertiser: DiscoveryAdvertiser? = null
@@ -45,6 +58,16 @@ class MainActivity : ComponentActivity() {
     private var activityStarted = false
     /** Set when unlock arrives before the activity is visible again. */
     private var pendingResumeAccepting = false
+
+    private var frameCount = 0
+    private val fpsHandler = Handler(Looper.getMainLooper())
+    private val fpsTicker: Runnable = object : Runnable {
+        override fun run() {
+            fps = frameCount
+            frameCount = 0
+            fpsHandler.postDelayed(this, 1000)
+        }
+    }
 
     /** Wires Android window/lock/session APIs to the pure sleep state machine — see `HostSleepController`. */
     private val hostSleep = HostSleepController(
@@ -82,6 +105,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        deviceName = DiscoveryAdvertiser.deviceName(this)
+        showAnalytics = AppSettings.showAnalytics(this)
         if (!lockReceiverRegistered) {
             val filter = IntentFilter(Intent.ACTION_SCREEN_OFF).apply { addAction(Intent.ACTION_USER_PRESENT) }
             ContextCompat.registerReceiver(this, lockReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
@@ -91,6 +116,12 @@ class MainActivity : ComponentActivity() {
             OpenDisplayApp(
                 connected = connected,
                 hostDisplayOff = hostDisplayOff,
+                showSettings = showSettings,
+                deviceName = deviceName,
+                showAnalytics = showAnalytics,
+                fps = fps,
+                updateRequired = updateRequired,
+                recommendedUpdate = recommendedUpdate,
                 onWake = {
                     hostSleep.wake()
                     hostDisplayOff = false
@@ -101,6 +132,19 @@ class MainActivity : ComponentActivity() {
                     decoder = null
                 },
                 onControl = { session?.sendControl(it) },
+                onOpenSettings = { showSettings = true },
+                onCloseSettings = { showSettings = false },
+                onDeviceNameChange = { name ->
+                    deviceName = name
+                    DiscoveryAdvertiser.setSavedName(this, name)
+                    advertiser?.updateServiceName(DiscoveryAdvertiser.deviceName(this))
+                },
+                onShowAnalyticsChange = { value ->
+                    showAnalytics = value
+                    AppSettings.setShowAnalytics(this, value)
+                },
+                onOpenProjectSite = { openUrl(VersionGate.PROJECT_SITE_URL) },
+                onUpdate = { url -> openUrl(url) },
             )
         }
     }
@@ -147,6 +191,7 @@ class MainActivity : ComponentActivity() {
         advertiser = null
         decoder?.release()
         decoder = null
+        fpsHandler.removeCallbacks(fpsTicker)
     }
 
     /** Rotation: keep the session alive, just tell the Mac about the new panel — see `ReceiverSession.updatePanel`. */
@@ -154,6 +199,14 @@ class MainActivity : ComponentActivity() {
         super.onConfigurationChanged(newConfig)
         val metrics = resources.displayMetrics
         session?.updatePanel(metrics.widthPixels, metrics.heightPixels, metrics.density.toDouble())
+    }
+
+    private fun openUrl(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (_: Exception) {
+            // No browser/Play Store to handle it — nothing more we can do.
+        }
     }
 
     private fun setWindowBrightness(value: Float?) {
@@ -174,6 +227,9 @@ class MainActivity : ComponentActivity() {
                 hostSleep.onConnected()
                 hostDisplayOff = hostSleep.hostDisplayOff
                 window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                frameCount = 0
+                fpsHandler.removeCallbacks(fpsTicker)
+                fpsHandler.postDelayed(fpsTicker, 1000)
             }
         }
 
@@ -181,18 +237,30 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 connected = false
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                fpsHandler.removeCallbacks(fpsTicker)
+                fps = 0
             }
         }
 
         override fun onVideoFrame(data: ByteArray) {
+            frameCount++
             decoder?.feedAnnexB(data)
         }
 
         override fun onControl(map: Map<String, Any>) {
-            if (map["type"] == WireMessage.hostSleeping) {
-                runOnUiThread {
+            when (map["type"]) {
+                WireMessage.hostSleeping -> runOnUiThread {
                     hostSleep.onHostSleeping()
                     hostDisplayOff = true
+                }
+                // welcome/updateRequired: peer-driven update signals — see `VersionGate`.
+                WireMessage.welcome, WireMessage.updateRequired -> {
+                    versionGate.onControl(map)
+                    runOnUiThread {
+                        val status = versionGate.status
+                        updateRequired = (status as? VersionGate.Status.Required)?.update
+                        recommendedUpdate = (status as? VersionGate.Status.Recommended)?.update
+                    }
                 }
             }
         }
@@ -201,17 +269,37 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/**
+ * Top-level navigation. Priority mirrors `ReceiverScreen` on iOS: a blocking
+ * [VersionGate.Status.Required] gate wins over everything (even mid-stream —
+ * the Mac has already refused this pairing); otherwise host-display-off,
+ * streaming, settings, and idle are mutually exclusive full-screen states.
+ */
 @Composable
 fun OpenDisplayApp(
     connected: Boolean,
     hostDisplayOff: Boolean,
+    showSettings: Boolean,
+    deviceName: String,
+    showAnalytics: Boolean,
+    fps: Int,
+    updateRequired: VersionGate.Update?,
+    recommendedUpdate: VersionGate.Update?,
     onWake: () -> Unit,
     onSurfaceReady: (VideoDecoder) -> Unit,
     onSurfaceDestroyed: () -> Unit,
     onControl: (Map<String, Any>) -> Unit,
+    onOpenSettings: () -> Unit,
+    onCloseSettings: () -> Unit,
+    onDeviceNameChange: (String) -> Unit,
+    onShowAnalyticsChange: (Boolean) -> Unit,
+    onOpenProjectSite: () -> Unit,
+    onUpdate: (String) -> Unit,
 ) {
     MaterialTheme {
-        if (hostDisplayOff) {
+        if (updateRequired != null) {
+            UpdateRequiredScreen(update = updateRequired, onUpdate = { onUpdate(updateRequired.url) })
+        } else if (hostDisplayOff) {
             // Mac is asleep — blank the panel too; tap restores brightness
             // without ending the wait for it to wake. Mirrors iOS's
             // `hostDisplayOff` overlay in `OpenSidecarPhoneApp.swift`.
@@ -221,17 +309,33 @@ fun OpenDisplayApp(
                     .clickable(onClick = onWake),
             )
         } else if (connected) {
-            StreamingScreen(
-                onSurfaceReady = onSurfaceReady,
-                onSurfaceDestroyed = onSurfaceDestroyed,
-                onControl = onControl,
-            )
-        } else {
-            Surface(modifier = Modifier.fillMaxSize()) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("OpenDisplay — waiting for connection…")
+            Box(modifier = Modifier.fillMaxSize()) {
+                StreamingScreen(
+                    onSurfaceReady = onSurfaceReady,
+                    onSurfaceDestroyed = onSurfaceDestroyed,
+                    onControl = onControl,
+                )
+                if (showAnalytics) {
+                    PerfOverlay(fps = fps, modifier = Modifier.fillMaxSize())
                 }
             }
+        } else if (showSettings) {
+            SettingsScreen(
+                deviceName = deviceName,
+                onDeviceNameChange = onDeviceNameChange,
+                connectionStatus = if (connected) "Connected" else "Waiting for Mac",
+                showAnalytics = showAnalytics,
+                onShowAnalyticsChange = onShowAnalyticsChange,
+                onOpenProjectSite = onOpenProjectSite,
+                onClose = onCloseSettings,
+            )
+        } else {
+            IdleScreen(
+                status = if (connected) "connected" else "waiting for Mac",
+                recommendedUpdate = recommendedUpdate,
+                onUpdateRecommended = { recommendedUpdate?.let { onUpdate(it.url) } },
+                onOpenSettings = onOpenSettings,
+            )
         }
     }
 }

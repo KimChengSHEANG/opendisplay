@@ -16,7 +16,7 @@ import com.peetzweg.opendisplay.wire.WireProtocol
  */
 class DiscoveryAdvertiser(
     private val context: Context,
-    private val serviceName: String,
+    private var serviceName: String,
     private val installId: String,
 ) {
     private val nsdManager: NsdManager by lazy {
@@ -24,6 +24,7 @@ class DiscoveryAdvertiser(
     }
 
     @Volatile private var registered = false
+    private var lastPort = 9000
 
     private val registrationListener =
         object : NsdManager.RegistrationListener {
@@ -46,6 +47,7 @@ class DiscoveryAdvertiser(
         }
 
     fun start(port: Int = 9000) {
+        lastPort = port
         val info =
             NsdServiceInfo().apply {
                 serviceName = this@DiscoveryAdvertiser.serviceName
@@ -62,6 +64,16 @@ class DiscoveryAdvertiser(
         nsdManager.unregisterService(registrationListener)
     }
 
+    /** User edited the device name in Settings — re-advertise under it. Mirrors `PhoneReceiver.setServiceName`. */
+    fun updateServiceName(name: String) {
+        if (name == serviceName) return
+        serviceName = name
+        if (registered) {
+            stop()
+        }
+        start(lastPort)
+    }
+
     companion object {
         private const val TAG = "DiscoveryAdvertiser"
 
@@ -70,16 +82,34 @@ class DiscoveryAdvertiser(
         // NWBrowser/NWListener type without one — same wire type either way.
         const val SERVICE_TYPE = "_opensidecar._tcp."
 
+        private const val PREFS_NAME = "opendisplay_settings"
+        private const val KEY_DEVICE_NAME = "device_name"
+
         /**
          * User-visible device name for the advertised service, e.g. "Pixel 7" —
-         * the name set in Settings > About/Bluetooth, not the app-level
+         * a user override persisted via [setSavedName] takes priority (mirrors
+         * `deviceName`/`DeviceNameField` in `iOS/OpenSidecarPhoneApp.swift`),
+         * then the name set in Settings > About/Bluetooth, not the app-level
          * "Android"/"Chromebook" kind from [com.peetzweg.opendisplay.session.ReceiverSession.deviceKind].
-         * Mirrors `UIDevice.current.name` on iOS.
          */
         fun deviceName(context: Context): String {
+            val saved = savedName(context)
+            if (!saved.isNullOrBlank()) return saved
             val settingsName = Settings.Global.getString(context.contentResolver, Settings.Global.DEVICE_NAME)
             if (!settingsName.isNullOrBlank()) return settingsName
             return Build.MODEL ?: "OpenDisplay"
+        }
+
+        /** The persisted override, or null if the user never set one. */
+        fun savedName(context: Context): String? =
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_DEVICE_NAME, null)
+
+        /** Persists the user's device-name override for [deviceName]/[SettingsScreen]. Blank clears it. */
+        fun setSavedName(context: Context, name: String) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val trimmed = name.trim()
+            if (trimmed.isEmpty()) prefs.edit().remove(KEY_DEVICE_NAME).apply()
+            else prefs.edit().putString(KEY_DEVICE_NAME, trimmed).apply()
         }
     }
 }
