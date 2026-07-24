@@ -15,6 +15,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import com.peetzweg.opendisplay.net.DiscoveryAdvertiser
 import com.peetzweg.opendisplay.session.InstallId
 import com.peetzweg.opendisplay.session.ReceiverSession
 import com.peetzweg.opendisplay.ui.StreamingScreen
@@ -24,6 +25,7 @@ class MainActivity : ComponentActivity() {
     private var connected by mutableStateOf(false)
     private var session: ReceiverSession? = null
     private var decoder: VideoDecoder? = null
+    private var advertiser: DiscoveryAdvertiser? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,20 +45,27 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         if (session != null) return
         val metrics = resources.displayMetrics
+        val installId = InstallId.get(this)
         val s = ReceiverSession(listener = ReceiverListener())
-        s.installId = InstallId.get(this)
+        s.installId = installId
         s.device = ReceiverSession.deviceKind(this)
         s.pixelsWide = metrics.widthPixels
         s.pixelsHigh = metrics.heightPixels
         s.scale = metrics.density.toDouble()
         s.start()
         session = s
+
+        val a = DiscoveryAdvertiser(this, DiscoveryAdvertiser.deviceName(this), installId)
+        a.start(port = ReceiverSession.DEFAULT_PORT)
+        advertiser = a
     }
 
     override fun onDestroy() {
         super.onDestroy()
         session?.stop()
         session = null
+        advertiser?.stop()
+        advertiser = null
         decoder?.release()
         decoder = null
     }
