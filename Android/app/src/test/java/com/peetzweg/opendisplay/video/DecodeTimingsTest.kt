@@ -73,4 +73,34 @@ class DecodeTimingsTest {
         timings.noteRendered(100L, 20 * ms)
         assertEquals(emptyList<Double>(), timings.snapshot())
     }
+
+    @Test
+    fun snapshotAndDrainReturnsSamplesThenEmpty() {
+        val timings = DecodeTimings()
+        timings.noteQueued(100L, 0L)
+        timings.noteQueued(200L, 5 * ms)
+        timings.noteRendered(100L, 12 * ms)
+        timings.noteRendered(200L, 13 * ms)
+
+        assertEquals(listOf(12.0, 8.0), timings.snapshotAndDrain())
+        assertEquals(emptyList<Double>(), timings.snapshotAndDrain())
+    }
+
+    @Test
+    fun drainDoesNotDiscardFramesStillPending() {
+        val timings = DecodeTimings()
+        timings.noteQueued(100L, 0L)
+        timings.noteRendered(100L, 10 * ms)
+        // A second frame is queued but has not rendered yet when we drain.
+        timings.noteQueued(200L, 20 * ms)
+
+        assertEquals(listOf(10.0), timings.snapshotAndDrain())
+        assertEquals(emptyList<Double>(), timings.snapshotAndDrain())
+
+        // The still-in-flight frame renders after the drain and must still
+        // show up in the next window (35 - 20 = 15ms, distinct from the
+        // first frame's 10ms so this isn't mistaken for a stale sample).
+        timings.noteRendered(200L, 35 * ms)
+        assertEquals(listOf(15.0), timings.snapshotAndDrain())
+    }
 }

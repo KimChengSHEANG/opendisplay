@@ -110,7 +110,7 @@ enum DisplayResolution: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// Multiplier applied to native HiDPI points (`panelPixels / hidpiDivisor`).
+    /// Multiplier applied to native HiDPI points (`panelPixels / 2`).
     var pointScale: Double {
         switch self {
         case .largerText: return 0.75
@@ -132,8 +132,8 @@ enum DisplayResolution: String, CaseIterable, Identifiable {
     var explanation: String {
         switch self {
         case .largerText: return "Fewer points — bigger UI, less desktop space."
-        case .standard: return "Native HiDPI match to the device panel."
-        case .moreSpace: return "More points — denser desktop; slight soft-scale on the panel."
+        case .standard: return "Retina match — panel pixels at @2x (sharp)."
+        case .moreSpace: return "More desktop points — denser UI; slight soft-scale on the panel."
         case .extraSpace: return "Maximum desktop real estate — densest UI; softest on-panel scale."
         }
     }
@@ -413,23 +413,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func setupExtend(_ info: PhoneInfo) async throws {
         Log.info("phone hello: \(info.pixelsWide)x\(info.pixelsHigh) @\(info.scale)x resolution=\(displayResolution.rawValue)")
 
-        // The virtual display runs @2x HiDPI, so points = native pixels / 2.
-        // That is right for iOS, whose panels are always @2x or @3x — and it
-        // is what every existing iOS session has shipped with, so leave it be.
-        // Android reports its real density and it goes down to ~1.0 on
-        // ChromeOS: halving an already-1x panel gives a desktop with half the
-        // points it should have, so macOS renders its UI at roughly twice the
-        // intended size. Only depart from /2 when the receiver says it is
-        // below 2x. Per-device DisplayResolution then scales that workspace.
-        let hidpiDivisor = min(2.0, max(1.0, info.scale))
-        let nativeWide = Int(Double(info.pixelsWide) / hidpiDivisor)
-        let nativeHigh = Int(Double(info.pixelsHigh) / hidpiDivisor)
+        // VirtualDisplay is always @2x HiDPI: points = panelPixels / 2, so the
+        // framebuffer matches the panel and capture-at-panel stays sharp
+        // (1 framebuffer px ↔ 1 panel px). Do NOT use Android/ChromeOS
+        // DisplayMetrics.density here — density ~1.0 made points ≈ panel,
+        // framebuffer 2× panel, and panel-sized capture looked soft (1 px/pt)
+        // with tiny UI. Receiver density only describes its own chrome.
+        // DisplayResolution then scales the workspace (More/Extra Space).
+        let nativeWide = info.pixelsWide / 2
+        let nativeHigh = info.pixelsHigh / 2
         let pointsWide = max(2, Int(Double(nativeWide) * displayResolution.pointScale) & ~1)
         let pointsHigh = max(2, Int(Double(nativeHigh) * displayResolution.pointScale) & ~1)
-        // Rough physical size so macOS picks a sane default UI scale.
-        let mm = info.pixelsWide >= info.pixelsHigh
-            ? CGSize(width: 147, height: 68)
-            : CGSize(width: 68, height: 147)
+        let mm = Self.physicalSizeMM(
+            panelWide: info.pixelsWide, panelHigh: info.pixelsHigh, kind: info.device
+        )
 
         // USB sessions can start before lockdown resolves the device name —
         // fall back to the kind from the hello rather than the generic label.
@@ -523,6 +520,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let width = max(2, Int(Double(panelWide) * scale) & ~1)
         let height = max(2, Int(Double(panelHigh) * scale) & ~1)
         return (width, height, bitrate, fps)
+    }
+
+    /// Physical size for CGVirtualDisplay. Phone mm is fine for iPhone/iPad;
+    /// Chromebook/Android laptop panels need real diagonal-ish mm or macOS
+    /// treats a large point desktop as phone-PPI and shrinks chrome further.
+    private static func physicalSizeMM(panelWide: Int, panelHigh: Int, kind: String?) -> CGSize {
+        if kind == "Chromebook" || kind == "Android" {
+            // Target ~135 point-PPI @2x (common Retina-class laptop feel).
+            let ppi = 135.0
+            let inchesW = Double(max(panelWide, 2) / 2) / ppi
+            let inchesH = Double(max(panelHigh, 2) / 2) / ppi
+            return CGSize(width: inchesW * 25.4, height: inchesH * 25.4)
+        }
+        return panelWide >= panelHigh
+            ? CGSize(width: 147, height: 68)
+            : CGSize(width: 68, height: 147)
     }
 
     /// Tear down and rebuild when the phone announces new dimensions. Loops

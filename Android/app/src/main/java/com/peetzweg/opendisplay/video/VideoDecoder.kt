@@ -12,6 +12,7 @@ import java.nio.ByteBuffer
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -57,7 +58,10 @@ class VideoDecoder(
     // and the main thread would add UI-queue delay to a latency measurement —
     // so give the callback its own thread. (We record the listener's own
     // nanoTime, so its delivery delay does not bias the sample.)
-    private val callbackThread = HandlerThread("VideoDecoder-cb").apply { start() }
+    private val callbackThread = HandlerThread("VideoDecoder-cb").apply {
+        isDaemon = true
+        start()
+    }
     private val callbackHandler = Handler(callbackThread.looper)
 
     private val released = AtomicBoolean(false)
@@ -101,7 +105,11 @@ class VideoDecoder(
             return
         }
         if (drainScheduled.compareAndSet(false, true)) {
-            decodeExecutor.execute { drainQueue() }
+            try {
+                decodeExecutor.execute { drainQueue() }
+            } catch (_: RejectedExecutionException) {
+                drainScheduled.set(false)
+            }
         }
     }
 
@@ -113,7 +121,7 @@ class VideoDecoder(
     }
 
     fun release() {
-        released.set(true)
+        if (released.getAndSet(true)) return
         queue.clear()
         decodeExecutor.execute {
             synchronized(this@VideoDecoder) {
@@ -123,9 +131,9 @@ class VideoDecoder(
                 hasRendered = false
                 keyframeRequested = false
             }
+            callbackThread.quitSafely()
         }
         decodeExecutor.shutdown()
-        callbackThread.quitSafely()
     }
 
     private fun drainQueue() {
@@ -141,7 +149,11 @@ class VideoDecoder(
             if (!released.get() && !renderingPaused &&
                 queue.isNotEmpty() && drainScheduled.compareAndSet(false, true)
             ) {
-                decodeExecutor.execute { drainQueue() }
+                try {
+                    decodeExecutor.execute { drainQueue() }
+                } catch (_: RejectedExecutionException) {
+                    drainScheduled.set(false)
+                }
             }
         }
     }

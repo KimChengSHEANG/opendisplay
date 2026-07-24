@@ -45,6 +45,7 @@ fun PerfOverlay(stats: PerfStats, modifier: Modifier = Modifier) {
                 }
                 if (stats.decodeP50 > 0) {
                     Metric("decode", "${stats.decodeP50.toInt()} ms")
+                    Metric("decode p95", "${stats.decodeP95.toInt()} ms")
                 }
                 if (stats.inputP50 > 0) {
                     Metric("input", "${stats.inputP50.toInt()} ms")

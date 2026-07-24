@@ -39,6 +39,19 @@ class DecodeTimings(private val capacity: Int = 120) {
     @Synchronized
     fun snapshot(): List<Double> = ArrayList(samples)
 
+    /**
+     * Snapshot the current samples and clear them so a subsequent idle
+     * window reports empty rather than replaying the last frames rendered.
+     * [queuedAt] is left untouched — those pts are still legitimately
+     * in-flight and must survive to be matched by a later [noteRendered].
+     */
+    @Synchronized
+    fun snapshotAndDrain(): List<Double> {
+        val result = ArrayList(samples)
+        samples.clear()
+        return result
+    }
+
     @Synchronized
     fun clear() {
         queuedAt.clear()

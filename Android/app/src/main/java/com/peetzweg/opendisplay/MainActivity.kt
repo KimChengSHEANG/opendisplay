@@ -63,7 +63,7 @@ class MainActivity : ComponentActivity() {
     private var recommendedUpdate by mutableStateOf<VersionGate.Update?>(null)
     private val versionGate = VersionGate()
     private var session: ReceiverSession? = null
-    private var decoder: VideoDecoder? = null
+    @Volatile private var decoder: VideoDecoder? = null
     /** Latest SPS+PPS+IDR seen while the decode surface wasn't ready yet. */
     @Volatile private var pendingSyncFrame: ByteArray? = null
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -356,7 +356,7 @@ class MainActivity : ComponentActivity() {
         override fun onVideoFrame(data: ByteArray) {
             val d = decoder
             if (d == null) {
-                // Hold the sync frame until TextureView is up — first-connect
+                // Hold the sync frame until SurfaceView is up — first-connect
                 // green screen on Chromebook is almost always a missed IDR.
                 if (VideoDecoder.containsIdr(data)) pendingSyncFrame = data.copyOf()
                 return
@@ -375,7 +375,7 @@ class MainActivity : ComponentActivity() {
         override fun onPerf(stats: PerfStats) {
             // The session times the network; the decoder times the panel.
             // Join them here — the only object that holds both.
-            val decode = decoder?.timings?.snapshot().orEmpty()
+            val decode = decoder?.timings?.snapshotAndDrain().orEmpty()
             val merged = stats.copy(
                 decodeP50 = SessionTelemetry.percentile(decode, 0.5),
                 decodeP95 = SessionTelemetry.percentile(decode, 0.95),
