@@ -172,15 +172,33 @@ class MainActivity : ComponentActivity() {
             val a = DiscoveryAdvertiser(this, DiscoveryAdvertiser.deviceName(this), installId)
             a.start(port = ReceiverSession.DEFAULT_PORT)
             advertiser = a
-        } else if (pendingResumeAccepting) {
-            session?.start()
+        } else {
+            // App switch return: re-arm the listener (Android may have killed
+            // the accept loop while we were suspended) and ask the Mac for a
+            // keyframe if the TCP session survived — mirrors iOS
+            // sceneDidActivate → ensureListening + setRenderingPaused(false).
             pendingResumeAccepting = false
+            session?.ensureListening()
+            if (session?.isConnected == true) {
+                session?.sendControl(mapOf("type" to "kf"))
+            }
+            if (advertiser == null) {
+                val a = DiscoveryAdvertiser(
+                    this,
+                    DiscoveryAdvertiser.deviceName(this),
+                    InstallId.get(this),
+                )
+                a.start(port = ReceiverSession.DEFAULT_PORT)
+                advertiser = a
+            }
         }
     }
 
     override fun onStop() {
         super.onStop()
         activityStarted = false
+        // Keep listening across a plain app switch (like iOS). Only lock /
+        // quit tear the session down — see HostSleepController.
     }
 
     override fun onDestroy() {

@@ -746,12 +746,26 @@ final class SenderController: ObservableObject {
             session?.mbps = mbps
         }
         sender.onDisconnected = { [weak self, weak session] in
-            // Device unplugged / left the network and stayed gone: end this
-            // session fully (virtual display + capture + indicator). No
-            // transport fallback — reconnecting is the user's call.
+            // iOS keeps the TCP link alive across an app switch, so this path
+            // is "device really gone". Android freezes the process when the
+            // user leaves the receiver, so the link dies — treat that like
+            // sleep and keep dialing until they return (ensureListening).
             guard let self, let session else { return }
-            Log.info("device disconnected — session \(session.id) stopped")
-            self.end(session)
+            let target = session.target
+            let androidPeer: Bool = {
+                if case .androidUsb = target { return true }
+                if let kind = session.deviceKind,
+                   kind == "Android" || kind == "Chromebook" { return true }
+                return false
+            }()
+            if androidPeer {
+                Log.info("android peer disconnected — arming wake reconnect for \(session.id)")
+                self.end(session)
+                self.connect(to: target, awaitingWake: true)
+            } else {
+                Log.info("device disconnected — session \(session.id) stopped")
+                self.end(session)
+            }
         }
         sender.onPeerSleeping = { [weak self, weak session] in
             // The device locked. Unlike a plain disconnect this is a

@@ -35,12 +35,16 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     var installId: String = ""
 
     @Volatile private var running = false
+    /** True while the accept loop has an open ServerSocket. Mirrors iOS `listenerHealthy`. */
+    @Volatile private var listenerHealthy = false
     private var serverSocket: ServerSocket? = null
     private var acceptThread: Thread? = null
     private var readThread: Thread? = null
     @Volatile private var clientSocket: Socket? = null
     @Volatile private var outputStream: OutputStream? = null
     private val writeLock = Any()
+
+    val isConnected: Boolean get() = clientSocket != null
 
     fun start() {
         if (running) return
@@ -53,6 +57,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
 
     fun stop() {
         running = false
+        listenerHealthy = false
         try {
             serverSocket?.close()
         } catch (_: IOException) {
@@ -63,6 +68,19 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         acceptThread = null
         readThread?.interrupt()
         readThread = null
+    }
+
+    /**
+     * Re-arm the TCP listener if it died while we were backgrounded (Android
+     * can suspend the process; the accept loop exits and never comes back).
+     * Called when the activity returns to the foreground — mirrors iOS
+     * `PhoneReceiver.ensureListening()`.
+     */
+    fun ensureListening() {
+        if (running && listenerHealthy) return
+        listener.onStatus("listener not healthy — restarting")
+        stop()
+        start()
     }
 
     /** Send an arbitrary control message (e.g. `pong`, app-level events) to the connected peer. */
@@ -88,6 +106,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         try {
             val server = ServerSocket(port)
             serverSocket = server
+            listenerHealthy = true
             listener.onStatus("listening:$port")
             while (running) {
                 val socket = try {
@@ -101,6 +120,8 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
             }
         } catch (e: IOException) {
             if (running) listener.onStatus("listen-error:${e.message}")
+        } finally {
+            listenerHealthy = false
         }
     }
 
