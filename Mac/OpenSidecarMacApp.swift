@@ -519,6 +519,7 @@ final class SenderController: ObservableObject {
             if !wifiDisabled.contains(target.sessionID),
                activeSession(coveringWiFi: result) == nil,
                !cabled(result) {
+                Log.info("auto-connect WiFi \(target.sessionID)")
                 connect(to: target)
             }
         }
@@ -916,12 +917,33 @@ final class SenderController: ObservableObject {
             self.connect(to: target, awaitingWake: true)
         }
         sender.onPeerClosed = { [weak self, weak session] in
-            // The receiver app quit — a deliberate goodbye, so no reconnect
-            // waits around. Reopening the app is a fresh start handled by
-            // the normal discovery/auto-connect paths.
+            // iOS: quitting is final — reopen + Bonjour is a fresh connect.
+            // Android/Chromebook: the app sends `closing` on every quit (and
+            // often when backgrounded), then the user reopens seconds later.
+            // End + awaitingWake so we keep dialing until the listener is
+            // back — same as onDisconnected — instead of requiring a manual
+            // Connect click on the Mac.
             guard let self, let session else { return }
-            Log.info("session \(session.id) closed by the receiver — ending")
-            self.end(session)
+            let target = session.target
+            let androidPeer: Bool = {
+                if case .androidUsb = target { return true }
+                if let kind = session.deviceKind,
+                   kind == "Android" || kind == "Chromebook" { return true }
+                if let name = session.wifiServiceName,
+                   self.knownReceiverKinds["wifi:\(name)"] == "Android"
+                    || self.knownReceiverKinds["wifi:\(name)"] == "Chromebook" {
+                    return true
+                }
+                return false
+            }()
+            if androidPeer {
+                Log.info("android peer closed — arming wake reconnect for \(session.id)")
+                self.end(session)
+                self.connect(to: self.refreshed(target), awaitingWake: true)
+            } else {
+                Log.info("session \(session.id) closed by the receiver — ending")
+                self.end(session)
+            }
         }
         sessions.append(session)
         Task {
