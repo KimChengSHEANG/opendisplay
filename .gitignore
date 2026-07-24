@@ -38,3 +38,13 @@ fastlane/test_output/
 node_modules/
 dist-ssr/
 docs/
+.devswarm-temp/
+
+# Android / Gradle
+Android/local.properties
+Android/.gradle/
+Android/.idea/
+Android/*.iml
+Android/**/*.iml
+Android/captures/
+Android/**/.cxx/

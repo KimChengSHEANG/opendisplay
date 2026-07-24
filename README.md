@@ -134,6 +134,20 @@ xcodebuild -project OpenSidecar.xcodeproj -scheme OpenSidecariOS \
 team ID is shown at [developer.apple.com/account](https://developer.apple.com/account)
 under Membership, or just pick your team in Xcode's Signing pane.)
 
+### Build Android
+
+The Android app lives in `Android/` as a standalone Gradle project (not part
+of `OpenSidecar.xcodeproj`). Requires JDK 17+ and the Android SDK
+(compileSdk/targetSdk 35, minSdk 26).
+
+```sh
+cd Android
+./gradlew :app:assembleDebug           # build the debug APK
+./gradlew :app:testDebugUnitTest       # run unit tests
+```
+
+Or open the `Android/` folder in Android Studio and hit Run.
+
 ### Run (USB — recommended)
 
 1. Install + open **OpenDisplay** on the iPhone (it listens on port 9000).
