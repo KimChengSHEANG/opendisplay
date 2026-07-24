@@ -137,6 +137,10 @@ final class DeviceSession: ObservableObject, Identifiable {
     // The udid the session is (or was last) cabled through, so a usbmuxd
     // detach can be matched back to this session for failover.
     var usbUDID: String?
+    // ADB serial when this session rides `adb forward` (androidUsb target, or
+    // a WiFi session migrated onto the cable). Used for detach/failover the
+    // same way `usbUDID` is for usbmux.
+    var adbSerial: String?
     // The Bonjour service name this session was started from or failed over
     // to. Kept because browse results routinely arrive without their TXT
     // record (no install id to match on) and the USB device is detached
@@ -154,10 +158,11 @@ final class DeviceSession: ObservableObject, Identifiable {
         if case .usb(let udid) = target {
             onUSB = true
             usbUDID = udid
-        } else if case .androidUsb = target {
+        } else if case .androidUsb(let serial) = target {
             // Forward-tunnelled over the cable — a USB transport, but tracked
-            // separately (no usbmux DeviceID, so failover/migration skips it).
+            // separately (no usbmux DeviceID, so failover uses `adbSerial`).
             onUSB = true
+            adbSerial = serial
         } else {
             onUSB = false
         }
@@ -242,6 +247,12 @@ final class SenderController: ObservableObject {
     @Published private var installIDByUDID: [String: String] =
         UserDefaults.standard.dictionary(forKey: "installIDByUDID") as? [String: String] ?? [:] {
         didSet { UserDefaults.standard.set(installIDByUDID, forKey: "installIDByUDID") }
+    }
+    // Same map for Android ADB serials — pairs a cable/`adb connect` peer with
+    // its Bonjour service so WiFi↔USB upgrade and failover work like usbmux.
+    @Published private var installIDByAdbSerial: [String: String] =
+        UserDefaults.standard.dictionary(forKey: "installIDByAdbSerial") as? [String: String] ?? [:] {
+        didSet { UserDefaults.standard.set(installIDByAdbSerial, forKey: "installIDByAdbSerial") }
     }
     // Receiver kind ("Android", "Chromebook", …) learned from hello — keyed by
     // install id, Bonjour service name, or ADB serial so WiFi rows can show
@@ -354,7 +365,14 @@ final class SenderController: ObservableObject {
         if let installID { knownReceiverKinds[installID] = kind }
         switch target {
         case .wifi(let result):
-            if let name = serviceName(of: result) { knownReceiverKinds["wifi:\(name)"] = kind }
+            if let name = serviceName(of: result) {
+                knownReceiverKinds["wifi:\(name)"] = kind
+                // Pair any ADB serial already known for this install id.
+                if let installID,
+                   let serial = installIDByAdbSerial.first(where: { $0.value == installID })?.key {
+                    knownReceiverKinds["adb:\(serial):wifiName"] = name
+                }
+            }
         case .androidUsb(let serial):
             knownReceiverKinds["adb:\(serial)"] = kind
         default:
@@ -370,6 +388,30 @@ final class SenderController: ObservableObject {
         if let name = serviceName(of: result), let usbName = device.name,
            usbName == name { return true }
         return false
+    }
+
+    /// WiFi Bonjour peer and an ADB serial are the same Android/Chromebook.
+    private func sameAndroidDevice(_ result: NWBrowser.Result, serial: String) -> Bool {
+        if let id = txtID(of: result), installIDByAdbSerial[serial] == id { return true }
+        // Service name previously paired to this serial (from hello on either side).
+        if let name = serviceName(of: result),
+           knownReceiverKinds["adb:\(serial):wifiName"] == name {
+            return true
+        }
+        return false
+    }
+
+    /// An attached, auto-connectable USB / ADB device is (about to be) dialed
+    /// over the cable — its WiFi service must not be grabbed in the launch race.
+    private func cabled(_ result: NWBrowser.Result) -> Bool {
+        if usbDevices.contains(where: {
+            sameDevice(result, $0) && !usbDisabled.contains("usb:\($0.udid)")
+        }) { return true }
+        return androidDevices.contains(where: {
+            $0.authorized
+                && !adbDisabled.contains(ConnectionTarget.androidUsb(serial: $0.serial).sessionID)
+                && sameAndroidDevice(result, serial: $0.serial)
+        })
     }
 
     /// The session (over either transport) already serving this USB device.
@@ -389,16 +431,40 @@ final class SenderController: ObservableObject {
             return direct
         }
         return sessions.first { s in
-            guard case .usb(let udid) = s.target else { return false }
-            if let id = txtID(of: result), s.deviceID == id { return true }
-            if let udid, let device = usbDevices.first(where: { $0.udid == udid }),
-               sameDevice(result, device) { return true }
-            // Browse results routinely lack their TXT record and the USB
-            // device is gone after a failover — the service name is then
-            // the only remaining link to the session.
-            let name = serviceName(of: result)
-            return name != nil && (name == s.wifiServiceName || name == s.name)
+            if case .usb(let udid) = s.target {
+                if let id = txtID(of: result), s.deviceID == id { return true }
+                if let udid, let device = usbDevices.first(where: { $0.udid == udid }),
+                   sameDevice(result, device) { return true }
+                let name = serviceName(of: result)
+                return name != nil && (name == s.wifiServiceName || name == s.name)
+            }
+            if case .androidUsb(let serial) = s.target {
+                return sameAndroidDevice(result, serial: serial)
+                    || (txtID(of: result).map { installIDByAdbSerial[serial] == $0 } ?? false)
+                    || (s.deviceID != nil && s.deviceID == txtID(of: result))
+            }
+            // WiFi-origin session migrated onto ADB — still covers this service.
+            if let serial = s.adbSerial, s.onUSB {
+                return sameAndroidDevice(result, serial: serial)
+                    || (s.deviceID != nil && s.deviceID == txtID(of: result))
+            }
+            return false
         }
+    }
+
+    /// The session already serving this ADB serial (androidUsb target or a
+    /// WiFi session migrated onto the forward tunnel).
+    private func activeSession(coveringAndroid serial: String) -> DeviceSession? {
+        if let direct = session(for: ConnectionTarget.androidUsb(serial: serial).sessionID) {
+            return direct
+        }
+        if let id = installIDByAdbSerial[serial],
+           let byID = sessions.first(where: { $0.deviceID == id }) {
+            return byID
+        }
+        return sessions.first { $0.adbSerial == serial }
+            ?? discovered.first(where: { sameAndroidDevice($0, serial: serial) })
+                .flatMap { activeSession(coveringWiFi: $0) }
     }
 
     // MARK: - Connection policy
@@ -423,12 +489,15 @@ final class SenderController: ObservableObject {
                 connect(to: .usb(udid: device.udid))
             }
         }
-        // Android over the cable: auto-connect authorized serials the user
-        // hasn't opted out of. Unauthorized devices wait for the on-phone
-        // "Allow USB debugging?" tap before they show a serial we can dial.
+        // Android over ADB (USB cable or `adb connect`): prefer migrating a
+        // live WiFi session onto the forward tunnel (iOS cable-upgrade parity);
+        // otherwise auto-connect authorized serials the user hasn't opted out of.
         for device in androidDevices where device.authorized {
             let target = ConnectionTarget.androidUsb(serial: device.serial)
-            if !adbDisabled.contains(target.sessionID), session(for: target.sessionID) == nil {
+            if let covering = activeSession(coveringAndroid: device.serial) {
+                upgradeToAndroidUSB(covering, serial: device.serial)
+            } else if !adbDisabled.contains(target.sessionID),
+                      session(for: target.sessionID) == nil {
                 connect(to: target)
             }
         }
@@ -510,14 +579,6 @@ final class SenderController: ObservableObject {
         }
     }
 
-    /// An attached, auto-connectable USB device is (about to be) dialed over
-    /// the cable — its WiFi service must not be grabbed in the launch race.
-    private func cabled(_ result: NWBrowser.Result) -> Bool {
-        usbDevices.contains {
-            sameDevice(result, $0) && !usbDisabled.contains("usb:\($0.udid)")
-        }
-    }
-
     /// Cable plugged in while the device streams over WiFi: migrate the live
     /// session onto USB. No-op when the session is already cabled.
     private func upgradeToUSB(_ session: DeviceSession, device: UsbmuxDevice) {
@@ -529,6 +590,33 @@ final class SenderController: ObservableObject {
         // future matching (and the next launch) recognizes the pair.
         if let id = session.deviceID { installIDByUDID[device.udid] = id }
         session.sender.switchTransport(to: .usb(udid: device.udid, port: portNum))
+    }
+
+    /// ADB appears while the device streams over WiFi: migrate onto
+    /// `adb forward` (phones over USB cable, or Chromebook via `adb connect`).
+    private func upgradeToAndroidUSB(_ session: DeviceSession, serial: String) {
+        // Already on this ADB tunnel — nothing to do.
+        if session.onUSB, session.adbSerial == serial { return }
+        guard let portNum = UInt16(port) else { return }
+        Log.info("adb attached for \(session.id) — migrating to Android USB (\(serial))")
+        do {
+            try Adb.forward(serial: serial, port: portNum)
+        } catch {
+            Log.info("adb forward failed for \(serial): \(error)")
+            return
+        }
+        session.onUSB = true
+        session.adbSerial = serial
+        if let id = session.deviceID { installIDByAdbSerial[serial] = id }
+        let wifiName = session.wifiServiceName
+            ?? discovered.first(where: { sameAndroidDevice($0, serial: serial) }).flatMap(serviceName)
+        if let wifiName {
+            knownReceiverKinds["adb:\(serial):wifiName"] = wifiName
+            session.wifiServiceName = wifiName
+        }
+        session.sender.switchTransport(to: .tcp(.hostPort(
+            host: "127.0.0.1",
+            port: NWEndpoint.Port(rawValue: portNum)!)))
     }
 
     /// Cable unplugged under a live session: fail over to the device's WiFi
@@ -546,20 +634,26 @@ final class SenderController: ObservableObject {
         }
     }
 
-    /// Cable pulled on an Android receiver: `adb devices` no longer lists the
-    /// serial. Unlike usbmux there's no WiFi failover for the forward tunnel —
-    /// end the session outright and tear down the (now-dangling) `adb forward`
-    /// so a replug starts clean. The device's WiFi service, if advertised,
-    /// remains available to connect to separately.
+    /// ADB serial gone (`adb devices` no longer lists it): fail over to the
+    /// device's Bonjour service when visible (iOS unplug parity). Otherwise
+    /// end the session and clear the dangling forward.
     private func androidDetached(_ detachedSerials: Set<String>) {
         guard !detachedSerials.isEmpty else { return }
         for serial in detachedSerials {
-            let id = ConnectionTarget.androidUsb(serial: serial).sessionID
-            if let session = session(for: id) {
-                Log.info("adb device \(serial) detached — ending session \(id)")
+            try? Adb.clearForward(serial: serial)
+            guard let session = activeSession(coveringAndroid: serial),
+                  session.adbSerial == serial || session.id == ConnectionTarget.androidUsb(serial: serial).sessionID
+            else { continue }
+            if let result = wifiService(for: session) {
+                Log.info("adb device \(serial) detached — failing over to WiFi")
+                session.onUSB = false
+                session.adbSerial = nil
+                session.wifiServiceName = serviceName(of: result)
+                session.sender.switchTransport(to: .tcp(result.endpoint))
+            } else {
+                Log.info("adb device \(serial) detached — ending session \(session.id)")
                 end(session)
             }
-            try? Adb.clearForward(serial: serial)
         }
     }
 
@@ -756,6 +850,18 @@ final class SenderController: ObservableObject {
             if case .usb(let udid?) = session.target, let installID = info.id {
                 self.installIDByUDID[udid] = installID
             }
+            if let serial = session.adbSerial, let installID = info.id {
+                self.installIDByAdbSerial[serial] = installID
+            }
+            if case .androidUsb(let serial) = session.target, let installID = info.id {
+                self.installIDByAdbSerial[serial] = installID
+            }
+            // Pair ADB serial ↔ Bonjour name once we know the install id.
+            if let installID = info.id, let name = session.wifiServiceName {
+                for (serial, id) in self.installIDByAdbSerial where id == installID {
+                    self.knownReceiverKinds["adb:\(serial):wifiName"] = name
+                }
+            }
             self.dedupeSessions()
             // The learned identity may reveal that this WiFi session's device
             // is cabled — take the upgrade opportunity right away.
@@ -834,6 +940,10 @@ final class SenderController: ObservableObject {
         // A migrated session is also reachable the other way — opt that side
         // out too, or auto-connect resurrects the device moments later.
         if session.onUSB, let udid = session.usbUDID { usbDisabled.insert("usb:\(udid)") }
+        if let serial = session.adbSerial {
+            adbDisabled.insert(ConnectionTarget.androidUsb(serial: serial).sessionID)
+            try? Adb.clearForward(serial: serial)
+        }
         if let name = session.wifiServiceName {
             wifiDisabled.insert("wifi:\(name)")
             wifiRemembered.remove("wifi:\(name)")
@@ -932,14 +1042,24 @@ final class SenderController: ObservableObject {
         for device in androidDevices {
             let target = ConnectionTarget.androidUsb(serial: device.serial)
             coveredSessionIDs.insert(target.sessionID)
-            let kind = knownReceiverKinds["adb:\(device.serial)"] ?? "Android"
+            // Fold the matching Bonjour service into this row (iOS USB+WiFi
+            // twin behavior) so Chromebooks/`adb connect` don't show twice.
+            let twin = discovered.first { sameAndroidDevice($0, serial: device.serial) }
+            if let twin, let name = serviceName(of: twin) { mergedServices.insert(name) }
+            if let twin { coveredSessionIDs.insert(ConnectionTarget.wifi(twin).sessionID) }
+            if let covering = activeSession(coveringAndroid: device.serial) {
+                coveredSessionIDs.insert(covering.id)
+            }
+            let kind = knownReceiverKinds["adb:\(device.serial)"]
+                ?? twin.flatMap { androidKindHint(forWiFi: $0) }
+                ?? "Android"
+            let displayName = twin.flatMap(serviceName)
+                ?? (device.authorized ? device.label : "\(device.label) — tap Allow on phone")
             entries.append(DeviceEntry(
                 id: "android:\(device.serial)",
-                name: device.authorized
-                    ? device.label
-                    : "\(device.label) — tap Allow on phone",
+                name: displayName,
                 usbTarget: device.authorized ? target : nil,
-                wifiTarget: nil,
+                wifiTarget: twin.map { .wifi($0) },
                 kindHint: kind == "Chromebook" ? kind : "Android"))
         }
         for result in discovered {

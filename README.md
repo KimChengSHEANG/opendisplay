@@ -168,13 +168,12 @@ TestFlight-equivalent for Android).
 
 For **Android** receivers, plug in a phone with USB debugging enabled — the
 Mac needs `adb` on its PATH (see Prerequisites) and auto-connects over the
-cable via `adb forward`. No WiFi needed.
+cable via `adb forward`. WiFi sessions migrate onto USB when the cable
+appears, and fail back to WiFi on unplug when Bonjour is still up.
 
-**Chromebooks** use WiFi or Ethernet only (no USB cable path for streaming).
-Most Chromebooks also **do not appear in `adb devices` over USB** — install the
-APK with Wi‑Fi ADB (`adb connect <chromebook-ip>`) or from Linux on the
-Chromebook (`adb connect arc`). See `Android/README.md`. Then join the same
-network as the Mac and pick the device from the Mac app's Devices list.
+**Chromebooks** primarily use WiFi/Ethernet. Most do not expose ADB on a USB-C
+cable to a Mac; use Bonjour, or `adb connect <chromebook-ip>` so the Mac can
+use the same ADB forward path. See `Android/README.md`.
 
 ### Run (WiFi)
 

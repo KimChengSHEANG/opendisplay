@@ -17,7 +17,10 @@ struct AdbDevice: Identifiable, Hashable {
     var authorized: Bool
 
     var id: String { serial }
-    var label: String { "Android (USB)" }
+    /// USB cable serials look like hex; `adb connect` uses `host:port`.
+    var label: String {
+        serial.contains(":") ? "Android (ADB network)" : "Android (USB)"
+    }
 }
 
 enum Adb {

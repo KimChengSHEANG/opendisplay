@@ -8,8 +8,8 @@ JSON control). The Mac OpenDisplay app discovers and connects to this receiver.
 
 | Device | Connection | Notes |
 |---|---|---|
-| Android phone / tablet | **USB** (recommended) or **WiFi** | USB needs `adb` on the Mac + USB debugging on the device |
-| Chromebook | **WiFi / Ethernet only** | No USB cable path in v1 — install the APK and join the same LAN as the Mac |
+| Android phone / tablet | **USB** (recommended) or **WiFi** | USB needs `adb` on the Mac + USB debugging on the device; Mac auto-connects and prefers USB over WiFi for the same device |
+| Chromebook | **WiFi / Ethernet**, or **ADB** (`adb connect`) | Physical USB-C into a Mac usually does **not** expose ADB. Use Bonjour WiFi, or `adb connect <ip>` so the Mac can use the same `adb forward` USB path |
 
 ## Prerequisites
 
@@ -86,12 +86,15 @@ Streaming still uses **WiFi/Ethernet Bonjour**, not the ADB tunnel.
 
 ## Connect from the Mac
 
-- **WiFi / Chromebook:** same WiFi as the Mac → pick the device in the Mac app's
-  Devices list (Bonjour `_opensidecar._tcp`). Chromebooks never use the USB/`adb`
-  path for streaming.
-- **USB (phones/tablets):** plug in with USB debugging authorized → Mac auto-connects
-  via `adb forward`. Install platform-tools on the Mac if the app shows a missing-`adb`
-  banner (`brew install --cask android-platform-tools`).
+- **WiFi / Chromebook:** same WiFi as the Mac → OpenDisplay auto-connects when
+  the receiver appears (Bonjour `_opensidecar._tcp`).
+- **USB (phones/tablets):** plug in with USB debugging authorized → Mac
+  auto-connects via `adb forward`, and will migrate a live WiFi session onto
+  the cable (iOS-style). Unplug fails over to WiFi when the service is still up.
+- **Chromebook via ADB:** `adb connect <chromebook-ip>` makes the device show
+  up like USB; same forward tunnel and WiFi failover. Install platform-tools
+  on the Mac if the app shows a missing-`adb` banner
+  (`brew install --cask android-platform-tools`).
 
 ## Staying awake while streaming
 
