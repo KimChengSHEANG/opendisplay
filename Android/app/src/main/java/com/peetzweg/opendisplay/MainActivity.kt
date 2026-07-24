@@ -30,6 +30,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.peetzweg.opendisplay.net.DiscoveryAdvertiser
 import com.peetzweg.opendisplay.session.InstallId
+import com.peetzweg.opendisplay.session.PanelMetrics
 import com.peetzweg.opendisplay.session.ReceiverSession
 import com.peetzweg.opendisplay.settings.AppSettings
 import com.peetzweg.opendisplay.sleep.HostSleepController
@@ -51,7 +52,9 @@ class MainActivity : ComponentActivity() {
     private var deviceName by mutableStateOf("")
     private var showAnalytics by mutableStateOf(false)
     private var fps by mutableStateOf(0)
-    private val cursorController = CursorController()
+    private val cursorController by lazy {
+        CursorController(chromebook = ReceiverSession.deviceKind(this) == "Chromebook")
+    }
     private var updateRequired by mutableStateOf<VersionGate.Update?>(null)
     private var recommendedUpdate by mutableStateOf<VersionGate.Update?>(null)
     private val versionGate = VersionGate()
@@ -184,14 +187,14 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         activityStarted = true
         if (session == null) {
-            val metrics = resources.displayMetrics
+            val panel = PanelMetrics.of(this)
             val installId = InstallId.get(this)
             val s = ReceiverSession(listener = ReceiverListener())
             s.installId = installId
             s.device = ReceiverSession.deviceKind(this)
-            s.pixelsWide = metrics.widthPixels
-            s.pixelsHigh = metrics.heightPixels
-            s.scale = metrics.density.toDouble()
+            s.pixelsWide = panel.wide
+            s.pixelsHigh = panel.high
+            s.scale = panel.density
             s.start()
             session = s
 
@@ -252,8 +255,8 @@ class MainActivity : ComponentActivity() {
     /** Rotation: keep the session alive, just tell the Mac about the new panel — see `ReceiverSession.updatePanel`. */
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        val metrics = resources.displayMetrics
-        session?.updatePanel(metrics.widthPixels, metrics.heightPixels, metrics.density.toDouble())
+        val panel = PanelMetrics.of(this)
+        session?.updatePanel(panel.wide, panel.high, panel.density)
     }
 
     private fun openUrl(url: String) {
@@ -305,6 +308,10 @@ class MainActivity : ComponentActivity() {
                 hostDisplayOff = hostSleep.hostDisplayOff
                 window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 applyImmersive()
+                // Immersive + real panel size: re-announce if chrome changed
+                // the window metrics between listen and fullscreen.
+                val panel = PanelMetrics.of(this@MainActivity)
+                session?.updatePanel(panel.wide, panel.high, panel.density)
                 frameCount = 0
                 fpsHandler.removeCallbacks(fpsTicker)
                 fpsHandler.postDelayed(fpsTicker, 1000)

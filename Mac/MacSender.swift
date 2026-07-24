@@ -64,8 +64,8 @@ enum StreamQuality: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Per-device default when nothing is saved yet. Chromebook uses Best so
-    /// the stream matches the panel; fps stays at 30 for software decode load.
+    /// Per-device default when nothing is saved yet. Chromebook uses Best with
+    /// a long-edge clamp in capturePlan (sharp without soft-decode lag).
     static func `default`(forDeviceKind kind: String?, global: StreamQuality) -> StreamQuality {
         if kind == "Chromebook" { return .best }
         return global
@@ -476,11 +476,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // Quality scaling: capture/encode below native when requested — the
         // display itself stays native so window layout is unaffected.
         let plan = Self.capturePlan(
-            pointsWide: pointsWide, pointsHigh: pointsHigh,
+            panelWide: info.pixelsWide, panelHigh: info.pixelsHigh,
             quality: quality, frameRate: frameRatePreset, deviceKind: info.device
         )
         encodeBitrate = plan.bitrate
         encodeFrameRate = plan.fps
+        Log.info("capture plan: \(plan.width)x\(plan.height)@\(plan.fps) \(plan.bitrate/1_000_000)Mbps quality=\(quality.rawValue) resolution=\(displayResolution.rawValue) kind=\(info.device ?? "?")")
         try await startCapture(
             display: display,
             pixelsWide: plan.width,
@@ -497,21 +498,25 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    /// Capture/encode size for the virtual display framebuffer.
-    /// Chromebook software AVC: allow up to panel-class long edge (2400) so
-    /// Standard/Best stay sharp; Bandwidth/fps presets still control load.
+    /// Capture/encode size from the receiver's announced **panel pixels**
+    /// (not VD points×2). More Space / Larger Text only change macOS workspace
+    /// density; encoding against inflated points made Chromebook soft (e.g.
+    /// More Space + Fast → 1500p upscaled to 2400).
     private static func capturePlan(
-        pointsWide: Int, pointsHigh: Int,
+        panelWide: Int, panelHigh: Int,
         quality: StreamQuality, frameRate: StreamFrameRate, deviceKind: String?
     ) -> (width: Int, height: Int, bitrate: Int, fps: Int) {
         let scale = quality.scale
-        let bitrate = quality.bitrate
+        var bitrate = quality.bitrate
         let fps = frameRate.rawValue
-        // Soft ceiling for ARC software decode — was 1600 and looked soft on
-        // 2400-class Cheets panels; 2400 matches native HiDPI framebuffer.
-        let maxLongEdge = deviceKind == "Chromebook" ? 2400 : Int.max
-        var width = max(2, Int(Double(pointsWide * 2) * scale) & ~1)
-        var height = max(2, Int(Double(pointsHigh * 2) * scale) & ~1)
+        // Software AVC on Cheets: 1920 long edge stays sharp on 2400 panels
+        // without the multi-second lag of Best@2400.
+        let maxLongEdge = deviceKind == "Chromebook" ? 1920 : Int.max
+        if deviceKind == "Chromebook" {
+            bitrate = min(bitrate, 12_000_000)
+        }
+        var width = max(2, Int(Double(panelWide) * scale) & ~1)
+        var height = max(2, Int(Double(panelHigh) * scale) & ~1)
         let longEdge = max(width, height)
         if longEdge > maxLongEdge {
             let s = Double(maxLongEdge) / Double(longEdge)

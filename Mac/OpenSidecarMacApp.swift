@@ -942,6 +942,9 @@ final class SenderController: ObservableObject {
     private func resolvedResolution(keys: [String], kind: String?) -> DisplayResolution {
         for key in keys {
             if let raw = resolutionByDevice[key], let value = DisplayResolution(rawValue: raw) {
+                // Old Chromebook default was More Space, which inflated encode
+                // and looked soft under the long-edge clamp — treat as Standard.
+                if kind == "Chromebook" && value == .moreSpace { return .standard }
                 return value
             }
         }
@@ -957,6 +960,8 @@ final class SenderController: ObservableObject {
     private func resolvedQuality(keys: [String], kind: String?) -> StreamQuality {
         for key in keys {
             if let raw = qualityByDevice[key], let value = StreamQuality(rawValue: raw) {
+                // Fast on Chromebook is unreadably soft; bump to Balanced.
+                if kind == "Chromebook" && value == .fast { return .balanced }
                 return value
             }
         }
@@ -973,6 +978,8 @@ final class SenderController: ObservableObject {
         for key in keys {
             if let raw = frameRateByDevice[key], let intVal = Int(raw),
                let value = StreamFrameRate(rawValue: intVal) {
+                // 60fps software decode on Cheets can't keep up — keep 30.
+                if kind == "Chromebook" && value == .fps60 { return .fps30 }
                 return value
             }
         }

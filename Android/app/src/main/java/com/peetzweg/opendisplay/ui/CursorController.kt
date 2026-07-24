@@ -16,8 +16,11 @@ import android.widget.ImageView
  * updates a `CALayer` directly; we do the same with an [ImageView]:
  * size/sprite via layout params only when they change, position via
  * `translationX`/`translationY` (no layout).
+ *
+ * Chromebook: Mac normalizes the sprite against VD points, which reads tiny
+ * on 240dpi Cheets panels — enforce a density-based floor and boost.
  */
-class CursorController {
+class CursorController(private val chromebook: Boolean = false) {
     @Volatile private var host: View? = null
     @Volatile private var view: ImageView? = null
 
@@ -112,8 +115,22 @@ class CursorController {
             v.visibility = View.GONE
             return
         }
-        val w = (normW * pw).toInt().coerceAtLeast(1)
-        val h = (normH * ph).toInt().coerceAtLeast(1)
+        var w = (normW * pw).toInt().coerceAtLeast(1)
+        var h = (normH * ph).toInt().coerceAtLeast(1)
+        if (chromebook) {
+            // ~32dp min long edge at the panel density; also 1.6× boost so
+            // Mac-point sprites match finger/trackpad expectations on Cheets.
+            val density = host.resources.displayMetrics.density
+            val minLong = (32f * density).toInt().coerceAtLeast(48)
+            val boost = 1.6f
+            w = (w * boost).toInt().coerceAtLeast(1)
+            h = (h * boost).toInt().coerceAtLeast(1)
+            if (maxOf(w, h) < minLong) {
+                val s = minLong.toFloat() / maxOf(w, h).toFloat()
+                w = (w * s).toInt().coerceAtLeast(1)
+                h = (h * s).toInt().coerceAtLeast(1)
+            }
+        }
         if (w != laidOutW || h != laidOutH) {
             val lp = (v.layoutParams as FrameLayout.LayoutParams).apply {
                 width = w

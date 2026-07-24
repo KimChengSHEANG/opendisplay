@@ -4,8 +4,10 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.PixelFormat
 import android.graphics.SurfaceTexture
+import android.os.Build
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.PointerIcon
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -53,6 +55,14 @@ fun StreamingScreen(
             val chromebook = ReceiverSession.deviceKind(context) == "Chromebook"
             val root = FrameLayout(context).apply {
                 setBackgroundColor(android.graphics.Color.BLACK)
+                if (chromebook && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    // Hide the ARC system pointer so only the Mac sprite shows
+                    // (otherwise two cursors, and ChromeOS's is tiny).
+                    pointerIcon = PointerIcon.getSystemIcon(
+                        context,
+                        PointerIcon.TYPE_NULL,
+                    )
+                }
             }
             val cursorView = ImageView(context).apply {
                 scaleType = ImageView.ScaleType.FIT_XY
@@ -65,12 +75,17 @@ fun StreamingScreen(
                     // Default z-order (hole-punch): sibling ImageView draws above
                     // the surface. Media-overlay / on-top would hide the cursor.
                     surfaceView.holder.setFormat(PixelFormat.OPAQUE)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        surfaceView.pointerIcon = PointerIcon.getSystemIcon(
+                            context,
+                            PointerIcon.TYPE_NULL,
+                        )
+                    }
                     surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
                         override fun surfaceCreated(holder: SurfaceHolder) {
                             // VDA hardware paints solid green on Cheets even
                             // with SurfaceView; software AVC is the reliable
-                            // path. Mac encodes up to ~2400p@30 so OMX.google
-                            // stays sharp enough on Cheets panels.
+                            // path. Mac clamps Chromebook encode (~1920@30).
                             onSurfaceReady(
                                 VideoDecoder(
                                     holder.surface,
