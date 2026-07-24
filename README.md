@@ -170,9 +170,11 @@ For **Android** receivers, plug in a phone with USB debugging enabled — the
 Mac needs `adb` on its PATH (see Prerequisites) and auto-connects over the
 cable via `adb forward`. No WiFi needed.
 
-**Chromebooks** use WiFi or Ethernet only (no USB cable path). Install the
-Android APK on the Chromebook, join the same network as the Mac, and pick the
-device from the Mac app's Devices list.
+**Chromebooks** use WiFi or Ethernet only (no USB cable path for streaming).
+Most Chromebooks also **do not appear in `adb devices` over USB** — install the
+APK with Wi‑Fi ADB (`adb connect <chromebook-ip>`) or from Linux on the
+Chromebook (`adb connect arc`). See `Android/README.md`. Then join the same
+network as the Mac and pick the device from the Mac app's Devices list.
 
 ### Run (WiFi)
 

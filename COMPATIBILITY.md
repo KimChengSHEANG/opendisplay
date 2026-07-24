@@ -153,8 +153,10 @@ the floor once a force-capable build has spread.
   shells out to `adb forward`. WiFi (Bonjour) needs no external tool. The wire
   protocol is identical across transports and platforms.
 - **Chromebooks** run the same Android APK but connect over **WiFi/Ethernet
-  only** in v1 — USB debugging into ARC is out of scope; treat Chromebook as a
-  WiFi peer in the Mac device list.
+  only** in v1 — USB debugging into ARC is out of scope for streaming; treat
+  Chromebook as a WiFi peer in the Mac device list. Sideloading usually needs
+  **ADB over the network** (`adb connect <ip>`), not a USB cable — most
+  Chromebooks never show up in `adb devices` when plugged into a Mac.
 
 **Breaking changes are two-phase (never one-shot):**
 

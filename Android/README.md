@@ -42,17 +42,53 @@ Or open the `Android/` folder in Android Studio and use **Run**.
 There is no Play Store build yet — sideloading the debug (or release) APK is the
 equivalent of joining the iOS TestFlight beta.
 
+### Phones / tablets (USB)
+
 1. Build the APK (above).
-2. Enable **Install unknown apps** / developer sideloading on the device.
-3. Transfer and install the APK (`adb install app/build/outputs/apk/debug/app-debug.apk`,
-   or copy the file and open it on the device).
-4. On **phones/tablets for USB**: enable **USB debugging** in Developer options.
-5. Open **OpenDisplay** on the device and keep it in the foreground for WiFi discovery.
+2. Enable **USB debugging** in Developer options; plug into the Mac; tap **Allow**.
+3. `adb devices` should list the phone, then:
+   ```sh
+   adb install -r app/build/outputs/apk/debug/app-debug.apk
+   ```
+
+### Chromebook (no USB ADB on most models)
+
+Plugging a Chromebook into the Mac usually leaves `adb devices` **empty**. That is
+normal — as of 2023 most Chromebooks do not expose ADB on the USB cable. Use one
+of these instead:
+
+**A. ADB over Wi‑Fi from the Mac (recommended for install)**
+
+1. Chromebook: **Settings → Advanced → Developers → Linux development environment**
+   — turn Linux on if needed, then **Develop Android apps → Enable ADB debugging**
+   (Chromebook restarts).
+2. Note the Chromebook IP (clock → network → connection details).
+3. On the Mac:
+   ```sh
+   adb connect <chromebook-ip>        # e.g. adb connect 192.168.1.42
+   adb devices                        # should show <ip>:5555  device
+   adb install -r app/build/outputs/apk/debug/app-debug.apk
+   ```
+4. Tap **Allow** on the Chromebook debugging prompt.
+
+**B. Install from Linux on the Chromebook**
+
+1. Same ADB-debugging toggle as above.
+2. Chromebook **Terminal** (Linux):
+   ```sh
+   sudo apt update && sudo apt install -y adb
+   adb connect arc
+   adb install -r /path/to/app-debug.apk
+   ```
+3. Copy the APK onto the Chromebook first (Drive, USB stick, `scp`, etc.).
+
+Streaming still uses **WiFi/Ethernet Bonjour**, not the ADB tunnel.
 
 ## Connect from the Mac
 
 - **WiFi / Chromebook:** same WiFi as the Mac → pick the device in the Mac app's
-  Devices list (Bonjour `_opensidecar._tcp`).
+  Devices list (Bonjour `_opensidecar._tcp`). Chromebooks never use the USB/`adb`
+  path for streaming.
 - **USB (phones/tablets):** plug in with USB debugging authorized → Mac auto-connects
   via `adb forward`. Install platform-tools on the Mac if the app shows a missing-`adb`
   banner (`brew install --cask android-platform-tools`).
