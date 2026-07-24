@@ -31,8 +31,10 @@ import androidx.core.view.WindowInsetsControllerCompat
 import com.peetzweg.opendisplay.net.DiscoveryAdvertiser
 import com.peetzweg.opendisplay.session.InstallId
 import com.peetzweg.opendisplay.session.PanelMetrics
+import com.peetzweg.opendisplay.session.PerfStats
 import com.peetzweg.opendisplay.session.ReceiverSession
 import com.peetzweg.opendisplay.settings.AppSettings
+import com.peetzweg.opendisplay.settings.ConnectionMode
 import com.peetzweg.opendisplay.sleep.HostSleepController
 import com.peetzweg.opendisplay.ui.CursorController
 import com.peetzweg.opendisplay.ui.IdleScreen
@@ -51,7 +53,8 @@ class MainActivity : ComponentActivity() {
     private var showSettings by mutableStateOf(false)
     private var deviceName by mutableStateOf("")
     private var showAnalytics by mutableStateOf(false)
-    private var fps by mutableStateOf(0)
+    private var connectionMode by mutableStateOf(ConnectionMode.Both)
+    private var perf by mutableStateOf(PerfStats())
     private val cursorController by lazy {
         CursorController(chromebook = ReceiverSession.deviceKind(this) == "Chromebook")
     }
@@ -62,6 +65,7 @@ class MainActivity : ComponentActivity() {
     private var decoder: VideoDecoder? = null
     /** Latest SPS+PPS+IDR seen while the decode surface wasn't ready yet. */
     @Volatile private var pendingSyncFrame: ByteArray? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val kfRetryRunnable = Runnable {
         val d = decoder ?: return@Runnable
         if (session?.isConnected != true) return@Runnable
@@ -76,16 +80,6 @@ class MainActivity : ComponentActivity() {
     private var activityStarted = false
     /** Set when unlock arrives before the activity is visible again. */
     private var pendingResumeAccepting = false
-
-    private var frameCount = 0
-    private val fpsHandler = Handler(Looper.getMainLooper())
-    private val fpsTicker: Runnable = object : Runnable {
-        override fun run() {
-            fps = frameCount
-            frameCount = 0
-            fpsHandler.postDelayed(this, 1000)
-        }
-    }
 
     /** Wires Android window/lock/session APIs to the pure sleep state machine — see `HostSleepController`. */
     private val hostSleep = HostSleepController(
@@ -126,6 +120,7 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         deviceName = DiscoveryAdvertiser.deviceName(this)
         showAnalytics = AppSettings.showAnalytics(this)
+        connectionMode = AppSettings.connectionMode(this)
         if (!lockReceiverRegistered) {
             val filter = IntentFilter(Intent.ACTION_SCREEN_OFF).apply { addAction(Intent.ACTION_USER_PRESENT) }
             ContextCompat.registerReceiver(this, lockReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
@@ -138,7 +133,8 @@ class MainActivity : ComponentActivity() {
                 showSettings = showSettings,
                 deviceName = deviceName,
                 showAnalytics = showAnalytics,
-                fps = fps,
+                connectionMode = connectionMode,
+                perf = perf,
                 cursorController = cursorController,
                 updateRequired = updateRequired,
                 recommendedUpdate = recommendedUpdate,
@@ -152,18 +148,19 @@ class MainActivity : ComponentActivity() {
                     // opening IDR is often already on the wire — stash + replay
                     // it, then ask for another keyframe in case the stash was
                     // only P-frames or the ARC decoder needed a second sync.
+                    d.renderingPaused = false
                     decoder = d
                     val pending = pendingSyncFrame
                     pendingSyncFrame = null
                     if (pending != null) d.feedAnnexB(pending)
                     if (session?.isConnected == true) {
                         session?.sendControl(mapOf("type" to "kf"))
-                        fpsHandler.removeCallbacks(kfRetryRunnable)
-                        fpsHandler.postDelayed(kfRetryRunnable, 400)
+                        mainHandler.removeCallbacks(kfRetryRunnable)
+                        mainHandler.postDelayed(kfRetryRunnable, 400)
                     }
                 },
                 onSurfaceDestroyed = {
-                    fpsHandler.removeCallbacks(kfRetryRunnable)
+                    mainHandler.removeCallbacks(kfRetryRunnable)
                     decoder?.release()
                     decoder = null
                 },
@@ -178,6 +175,11 @@ class MainActivity : ComponentActivity() {
                 onShowAnalyticsChange = { value ->
                     showAnalytics = value
                     AppSettings.setShowAnalytics(this, value)
+                },
+                onConnectionModeChange = { mode ->
+                    connectionMode = mode
+                    AppSettings.setConnectionMode(this, mode)
+                    applyConnectionAdvertising()
                 },
                 onOpenProjectSite = { openUrl(VersionGate.PROJECT_SITE_URL) },
                 onUpdate = { url -> openUrl(url) },
@@ -199,45 +201,56 @@ class MainActivity : ComponentActivity() {
             s.scale = panel.density
             s.start()
             session = s
-
-            val a = DiscoveryAdvertiser(
-                this,
-                DiscoveryAdvertiser.deviceName(this),
-                installId,
-                deviceKind = ReceiverSession.deviceKind(this),
-            )
-            a.start(port = ReceiverSession.DEFAULT_PORT)
-            advertiser = a
+            applyConnectionAdvertising()
         } else {
             // App switch return: re-arm the listener (Android may have killed
             // the accept loop while we were suspended) and ask the Mac for a
             // keyframe if the TCP session survived — mirrors iOS
             // sceneDidActivate → ensureListening + setRenderingPaused(false).
-            pendingResumeAccepting = false
             decoder?.renderingPaused = false
             session?.ensureListening()
             if (session?.isConnected == true) {
                 session?.sendControl(mapOf("type" to "kf"))
             }
-            if (advertiser == null) {
-                val a = DiscoveryAdvertiser(
-                    this,
-                    DiscoveryAdvertiser.deviceName(this),
-                    InstallId.get(this),
-                    deviceKind = ReceiverSession.deviceKind(this),
-                )
-                a.start(port = ReceiverSession.DEFAULT_PORT)
-                advertiser = a
-            }
+            applyConnectionAdvertising()
+        }
+        if (pendingResumeAccepting) {
+            session?.start()
+            pendingResumeAccepting = false
+        }
+    }
+
+    /**
+     * Start or stop Bonjour/NSD based on [connectionMode]. TCP listen stays
+     * up either way — USB (`adb forward`) and WiFi both dial :9000.
+     */
+    private fun applyConnectionAdvertising() {
+        if (connectionMode.advertisesWifi) {
+            if (advertiser != null) return
+            val a = DiscoveryAdvertiser(
+                this,
+                DiscoveryAdvertiser.deviceName(this),
+                InstallId.get(this),
+                deviceKind = ReceiverSession.deviceKind(this),
+            )
+            a.start(port = ReceiverSession.DEFAULT_PORT)
+            advertiser = a
+        } else {
+            advertiser?.stop()
+            advertiser = null
         }
     }
 
     override fun onStop() {
         super.onStop()
         activityStarted = false
-        // iOS setRenderingPaused(true): stop feeding the codec while
-        // backgrounded; TCP/session stay up for a fast resume + kf.
-        decoder?.renderingPaused = true
+        // iOS setRenderingPaused(true) on background. ChromeOS ARC often
+        // delivers onStop while the stream surface stays on-screen (immersive
+        // / focus), which cleared the decode queue and left a black panel —
+        // skip pause on Chromebook; phones/tablets still pause.
+        if (ReceiverSession.deviceKind(this) != "Chromebook") {
+            decoder?.renderingPaused = true
+        }
         // Keep listening across a plain app switch (like iOS). Only lock /
         // quit tear the session down — see HostSleepController.
     }
@@ -260,7 +273,7 @@ class MainActivity : ComponentActivity() {
         }
         decoder?.release()
         decoder = null
-        fpsHandler.removeCallbacks(fpsTicker)
+        mainHandler.removeCallbacks(kfRetryRunnable)
     }
 
     /** Rotation: keep the session alive, just tell the Mac about the new panel — see `ReceiverSession.updatePanel`. */
@@ -323,9 +336,7 @@ class MainActivity : ComponentActivity() {
                 // the window metrics between listen and fullscreen.
                 val panel = PanelMetrics.of(this@MainActivity)
                 session?.updatePanel(panel.wide, panel.high, panel.density)
-                frameCount = 0
-                fpsHandler.removeCallbacks(fpsTicker)
-                fpsHandler.postDelayed(fpsTicker, 1000)
+                perf = PerfStats()
             }
         }
 
@@ -334,16 +345,14 @@ class MainActivity : ComponentActivity() {
                 connected = false
                 cursorController.hide()
                 pendingSyncFrame = null
-                fpsHandler.removeCallbacks(kfRetryRunnable)
+                mainHandler.removeCallbacks(kfRetryRunnable)
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 applyImmersive()
-                fpsHandler.removeCallbacks(fpsTicker)
-                fps = 0
+                perf = PerfStats()
             }
         }
 
         override fun onVideoFrame(data: ByteArray) {
-            frameCount++
             val d = decoder
             if (d == null) {
                 // Hold the sync frame until TextureView is up — first-connect
@@ -360,6 +369,10 @@ class MainActivity : ComponentActivity() {
                     session?.sendControl(mapOf("type" to "kf"))
                 }
             }
+        }
+
+        override fun onPerf(stats: PerfStats) {
+            runOnUiThread { perf = stats }
         }
 
         override fun onControl(map: Map<String, Any>) {
@@ -417,7 +430,8 @@ fun OpenDisplayApp(
     showSettings: Boolean,
     deviceName: String,
     showAnalytics: Boolean,
-    fps: Int,
+    connectionMode: ConnectionMode,
+    perf: PerfStats,
     cursorController: CursorController,
     updateRequired: VersionGate.Update?,
     recommendedUpdate: VersionGate.Update?,
@@ -429,6 +443,7 @@ fun OpenDisplayApp(
     onCloseSettings: () -> Unit,
     onDeviceNameChange: (String) -> Unit,
     onShowAnalyticsChange: (Boolean) -> Unit,
+    onConnectionModeChange: (ConnectionMode) -> Unit,
     onOpenProjectSite: () -> Unit,
     onUpdate: (String) -> Unit,
 ) {
@@ -453,7 +468,7 @@ fun OpenDisplayApp(
                     onControl = onControl,
                 )
                 if (showAnalytics) {
-                    PerfOverlay(fps = fps, modifier = Modifier.fillMaxSize())
+                    PerfOverlay(stats = perf, modifier = Modifier.fillMaxSize())
                 }
             }
         } else if (showSettings) {
@@ -461,6 +476,8 @@ fun OpenDisplayApp(
                 deviceName = deviceName,
                 onDeviceNameChange = onDeviceNameChange,
                 connectionStatus = if (connected) "Connected" else "Waiting for Mac",
+                connectionMode = connectionMode,
+                onConnectionModeChange = onConnectionModeChange,
                 showAnalytics = showAnalytics,
                 onShowAnalyticsChange = onShowAnalyticsChange,
                 onOpenProjectSite = onOpenProjectSite,
@@ -469,6 +486,7 @@ fun OpenDisplayApp(
         } else {
             IdleScreen(
                 status = if (connected) "connected" else "waiting for Mac",
+                connectionMode = connectionMode,
                 recommendedUpdate = recommendedUpdate,
                 onUpdateRecommended = { recommendedUpdate?.let { onUpdate(it.url) } },
                 onOpenSettings = onOpenSettings,

@@ -26,16 +26,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.peetzweg.opendisplay.settings.ConnectionMode
 import com.peetzweg.opendisplay.version.VersionGate
 
 /**
  * No-Mac-connected screen — Android's take on `IdleView` in
- * `iOS/OpenSidecarPhoneApp.swift`: app title, a status dot, how-to-connect
- * hints, and the way into [SettingsScreen].
+ * `iOS/OpenSidecarPhoneApp.swift`: app title, a status dot, USB/WiFi
+ * how-to-connect hints (filtered by [connectionMode]), and Settings.
  */
 @Composable
 fun IdleScreen(
     status: String,
+    connectionMode: ConnectionMode,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
     recommendedUpdate: VersionGate.Update? = null,
@@ -54,14 +56,36 @@ fun IdleScreen(
                     modifier = Modifier
                         .padding(end = 8.dp)
                         .size(8.dp)
-                        .background(if (status == "connected") Color(0xFF2E7D32) else Color(0xFFEF6C00), CircleShape),
+                        .background(
+                            if (status == "connected") Color(0xFF2E7D32) else Color(0xFFEF6C00),
+                            CircleShape,
+                        ),
                 )
                 Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            Spacer(Modifier.padding(4.dp))
+            Text(
+                connectionMode.label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
             Spacer(Modifier.padding(12.dp))
             Card(shape = RoundedCornerShape(16.dp), modifier = Modifier.widthIn(max = 420.dp)) {
                 Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("• Choose this device under WiFi in the Mac app")
+                    when (connectionMode) {
+                        ConnectionMode.Usb -> {
+                            Text("• Plug in USB (or adb connect) and start the Mac app")
+                            Text("• WiFi advertising is off — Mac won’t list this device on the network")
+                        }
+                        ConnectionMode.Wifi -> {
+                            Text("• Choose this device under WiFi in the Mac app")
+                            Text("• Both devices must be on the same network")
+                        }
+                        ConnectionMode.Both -> {
+                            Text("• Plug in USB and start the Mac app — connects automatically")
+                            Text("• Or choose this device under WiFi in the Mac app")
+                        }
+                    }
                     Text("• Keep this app open — streaming starts automatically")
                     Text("• Rotate the device for a vertical second monitor")
                 }

@@ -40,8 +40,11 @@ class CursorController(private val chromebook: Boolean = false) {
     fun attach(host: View, cursorView: ImageView) {
         this.host = host
         this.view = cursorView
-        // Hardware layer: translation updates skip software redraws (iOS CALayer).
-        cursorView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        // Hardware layer can break SurfaceView hole-punch compositing on
+        // ChromeOS ARC (black stream). Phones use TextureView — HW layer OK.
+        if (!chromebook) {
+            cursorView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        }
         runOnMain { applyAll() }
     }
 

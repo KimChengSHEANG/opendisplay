@@ -49,6 +49,13 @@ class DiscoveryAdvertiser(
 
     fun start(port: Int = 9000) {
         lastPort = port
+        if (registered) {
+            try {
+                nsdManager.unregisterService(registrationListener)
+            } catch (_: Exception) {
+            }
+            registered = false
+        }
         val info =
             NsdServiceInfo().apply {
                 serviceName = this@DiscoveryAdvertiser.serviceName

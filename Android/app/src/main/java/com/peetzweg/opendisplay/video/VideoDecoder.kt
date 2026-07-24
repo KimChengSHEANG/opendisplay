@@ -38,9 +38,10 @@ class VideoDecoder(
     private var pps: ByteArray? = null
     private val bufferInfo = MediaCodec.BufferInfo()
 
-    /** Shallow queue (~Metal single-slot latency bound at AU boundary). */
+    /** In-order AUs waiting for decode — depth keeps VDA fed without punching GOPs. */
     private val queue = ArrayBlockingQueue<ByteArray>(QUEUE_CAP)
     private val drainScheduled = AtomicBoolean(false)
+    private var droppedSinceKf: Int = 0
     private val decodeExecutor: ExecutorService = Executors.newSingleThreadExecutor { r ->
         Thread(r, "VideoDecoder").apply {
             isDaemon = true
@@ -49,7 +50,11 @@ class VideoDecoder(
     }
     private val released = AtomicBoolean(false)
 
-    /** iOS `renderingPaused` — drop frames while backgrounded. */
+    /**
+     * iOS `renderingPaused` — drop frames while backgrounded.
+     * Chromebook ARC often delivers spurious onStop while the panel stays
+     * visible; callers should leave this false on ARC (see MainActivity).
+     */
     @Volatile
     var renderingPaused: Boolean = false
         set(value) {
@@ -67,32 +72,31 @@ class VideoDecoder(
     fun consumeNeedsKeyframe(): Boolean {
         if (!keyframeRequested) return false
         keyframeRequested = false
+        droppedSinceKf = 0
         return true
     }
 
     /**
      * Non-blocking — safe to call from the TCP reader (iOS enqueue analogue).
-     * Preserves decode order. On overflow: keep an IDR if present, else ask
-     * for a keyframe — never silently drop mid-GOP P-frames into the codec.
+     * Preserves decode order. On overflow ask for an IDR after several misses
+     * (don't clear the live queue — that blacks Chromebook VDA on connect).
      */
     fun feedAnnexB(frame: ByteArray) {
         if (released.get() || renderingPaused) return
         val copy = frame.copyOf()
         if (!queue.offer(copy)) {
-            // Bound latency without punching the live GOP into the codec.
-            if (containsIdr(copy)) {
-                queue.clear()
-                if (!queue.offer(copy)) {
-                    keyframeRequested = true
-                    return
-                }
-            } else {
-                keyframeRequested = true
-                return
-            }
+            noteDrop()
+            return
         }
         if (drainScheduled.compareAndSet(false, true)) {
             decodeExecutor.execute { drainQueue() }
+        }
+    }
+
+    private fun noteDrop() {
+        droppedSinceKf++
+        if (droppedSinceKf >= DROP_KF_THRESHOLD) {
+            keyframeRequested = true
         }
     }
 
@@ -149,9 +153,8 @@ class VideoDecoder(
                 index = c.dequeueInputBuffer(if (isSync) SYNC_TIMEOUT_US else INPUT_TIMEOUT_US)
             }
             if (index < 0) {
-                // Still blocked — don't feed a hole; resync with an IDR.
-                keyframeRequested = true
-                queue.clear()
+                // Soft/HW backed up — don't punch a hole; ask IDR after several.
+                if (!isSync) noteDrop()
                 drainOutput(c)
                 return
             }
@@ -167,6 +170,11 @@ class VideoDecoder(
             drainOutput(c)
         } catch (e: IllegalStateException) {
             Log.w(TAG, "decodeOne: ${e.message}")
+            // VDA often dies after a SurfaceView abandon — rebuild on next IDR.
+            releaseCodec()
+            keyframeRequested = true
+            sps = null
+            pps = null
         }
     }
 
@@ -278,8 +286,9 @@ class VideoDecoder(
 
     companion object {
         private const val TAG = "VideoDecoder"
-        /** ~Metal latest-wins depth at the AU boundary (~33ms @ 60fps). */
-        private const val QUEUE_CAP = 2
+        /** Keep enough AUs for VDA warmup; shallow (2) blacks Chromebook on connect. */
+        private const val QUEUE_CAP = 8
+        private const val DROP_KF_THRESHOLD = 6
         private const val INPUT_TIMEOUT_US = 8_000L
         private const val SYNC_TIMEOUT_US = 100_000L
         private const val NAL_SPS = 7
