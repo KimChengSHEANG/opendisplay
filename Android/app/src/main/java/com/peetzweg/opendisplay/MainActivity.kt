@@ -37,6 +37,7 @@ class MainActivity : ComponentActivity() {
                     decoder?.release()
                     decoder = null
                 },
+                onControl = { session?.sendControl(it) },
             )
         }
     }
@@ -101,10 +102,15 @@ fun OpenDisplayApp(
     connected: Boolean,
     onSurfaceReady: (VideoDecoder) -> Unit,
     onSurfaceDestroyed: () -> Unit,
+    onControl: (Map<String, Any>) -> Unit,
 ) {
     MaterialTheme {
         if (connected) {
-            StreamingScreen(onSurfaceReady = onSurfaceReady, onSurfaceDestroyed = onSurfaceDestroyed)
+            StreamingScreen(
+                onSurfaceReady = onSurfaceReady,
+                onSurfaceDestroyed = onSurfaceDestroyed,
+                onControl = onControl,
+            )
         } else {
             Surface(modifier = Modifier.fillMaxSize()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
