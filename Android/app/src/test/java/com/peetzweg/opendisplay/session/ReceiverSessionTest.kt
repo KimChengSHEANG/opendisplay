@@ -1,7 +1,10 @@
 package com.peetzweg.opendisplay.session
 
 import org.json.JSONObject
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ReceiverSessionTest {
@@ -29,5 +32,37 @@ class ReceiverSessionTest {
         )
         val obj = JSONObject(json)
         assertEquals("Chromebook", obj.getString("device"))
+    }
+
+    @Test
+    fun isVideoFrame_plainAnnexBWithoutBraceIsVideo() {
+        val payload = byteArrayOf(0, 0, 0, 1, 0x67, 0x42)
+        assertTrue(ReceiverSession.isVideoFrame(payload))
+    }
+
+    @Test
+    fun isVideoFrame_pureControlJsonIsNotVideo() {
+        val payload = """{"type":"ping","t":1}""".toByteArray()
+        assertFalse(ReceiverSession.isVideoFrame(payload))
+    }
+
+    @Test
+    fun isVideoFrame_telemetryPrefixedAnnexBIsVideo() {
+        val json = """{"cap":100,"snd":101}""".toByteArray()
+        val annexB = byteArrayOf(0, 0, 0, 1, 0x65, 0x01)
+        assertTrue(ReceiverSession.isVideoFrame(json + annexB))
+    }
+
+    @Test
+    fun stripTelemetryPrefix_removesJsonHeaderAheadOfStartCode() {
+        val json = """{"cap":100,"snd":101}""".toByteArray()
+        val annexB = byteArrayOf(0, 0, 0, 1, 0x65, 0x01)
+        assertArrayEquals(annexB, ReceiverSession.stripTelemetryPrefix(json + annexB))
+    }
+
+    @Test
+    fun stripTelemetryPrefix_leavesPlainAnnexBUnchanged() {
+        val annexB = byteArrayOf(0, 0, 0, 1, 0x67, 0x42)
+        assertArrayEquals(annexB, ReceiverSession.stripTelemetryPrefix(annexB))
     }
 }

@@ -123,12 +123,12 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     }
 
     private fun processFrame(payload: ByteArray) {
-        if (payload.isNotEmpty() && payload[0] == '{'.code.toByte()) {
+        if (isVideoFrame(payload)) {
+            listener.onVideoFrame(stripTelemetryPrefix(payload))
+        } else {
             val map = parseControl(payload) ?: return
             if (map["type"] == "ping") sendControl(pongFor(map["t"]))
             listener.onControl(map)
-        } else {
-            listener.onVideoFrame(payload)
         }
     }
 
@@ -203,6 +203,42 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
             return if (pm.hasSystemFeature("org.chromium.arc") ||
                 pm.hasSystemFeature("org.chromium.arc.device_management")
             ) "Chromebook" else "Android"
+        }
+
+        /**
+         * True if `payload` is video, not control JSON. A payload starting with
+         * `{` isn't necessarily control: the Mac stamps every video frame with a
+         * `{"cap":...,"snd":...}` telemetry prefix directly ahead of the raw Annex
+         * B bytes (see `MacSender.swift`'s `encode(_:pts:)` / `annexB(from:)`) with
+         * no separating delimiter. Annex B start codes always contain a `0x00`
+         * byte; control JSON (hello/ping/pong/cursor/...) never does — mirrors the
+         * disambiguation `PhoneReceiver.swift`'s `handleAnnexB` uses.
+         */
+        fun isVideoFrame(payload: ByteArray): Boolean {
+            if (payload.isEmpty()) return false
+            if (payload[0] != '{'.code.toByte()) return true
+            return payload.any { it == 0.toByte() }
+        }
+
+        /** Strips a `{"cap":...,"snd":...}` telemetry prefix (if present), leaving pure Annex B. */
+        fun stripTelemetryPrefix(payload: ByteArray): ByteArray {
+            if (payload.isEmpty() || payload[0] != '{'.code.toByte()) return payload
+            val start = indexOfStartCode(payload)
+            return if (start > 0) payload.copyOfRange(start, payload.size) else payload
+        }
+
+        private fun indexOfStartCode(data: ByteArray): Int {
+            var i = 0
+            while (i + 2 < data.size) {
+                if (data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
+                    (data[i + 2] == 1.toByte() ||
+                        (i + 3 < data.size && data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()))
+                ) {
+                    return i
+                }
+                i++
+            }
+            return -1
         }
     }
 }
