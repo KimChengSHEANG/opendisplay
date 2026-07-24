@@ -4,6 +4,8 @@ import android.media.MediaCodec
 import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
@@ -48,6 +50,16 @@ class VideoDecoder(
             priority = Thread.MAX_PRIORITY
         }
     }
+    /** Queued→rendered latency for the perf overlay (iOS `decodeP50`). */
+    val timings = DecodeTimings()
+
+    // setOnFrameRenderedListener needs a Looper. The decode thread has none,
+    // and the main thread would add UI-queue delay to a latency measurement —
+    // so give the callback its own thread. (We record the listener's own
+    // nanoTime, so its delivery delay does not bias the sample.)
+    private val callbackThread = HandlerThread("VideoDecoder-cb").apply { start() }
+    private val callbackHandler = Handler(callbackThread.looper)
+
     private val released = AtomicBoolean(false)
 
     /**
@@ -113,6 +125,7 @@ class VideoDecoder(
             }
         }
         decodeExecutor.shutdown()
+        callbackThread.quitSafely()
     }
 
     private fun drainQueue() {
@@ -166,7 +179,9 @@ class VideoDecoder(
             input.clear()
             input.put(accessUnit)
             val flags = if (isSync) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
-            c.queueInputBuffer(index, 0, accessUnit.size, System.nanoTime() / 1000, flags)
+            val ptsUs = System.nanoTime() / 1000
+            c.queueInputBuffer(index, 0, accessUnit.size, ptsUs, flags)
+            timings.noteQueued(ptsUs, System.nanoTime())
             drainOutput(c)
         } catch (e: IllegalStateException) {
             Log.w(TAG, "decodeOne: ${e.message}")
@@ -247,6 +262,14 @@ class VideoDecoder(
             Log.i(TAG, "configure ${c.name} software=$preferSoftware")
             c.configure(format, surface, null, 0)
             c.start()
+            // Reset on the NEW codec, not on teardown: a mid-session rebuild
+            // (VDA after a surface abandon, a parameter-set change) must not
+            // blank the metric we are judging this work by, and any samples
+            // still pending belong to the codec that just went away.
+            timings.clear()
+            c.setOnFrameRenderedListener({ _, presentationTimeUs, nanoTime ->
+                timings.noteRendered(presentationTimeUs, nanoTime)
+            }, callbackHandler)
             codec = c
         } catch (e: Exception) {
             Log.e(TAG, "startCodec failed", e)

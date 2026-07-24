@@ -21,6 +21,9 @@ data class PerfStats(
     val inputP50: Double = 0.0,
     val inputP95: Double = 0.0,
     val capFps: Int = 0,
+    /** Queued→rendered inside the receiver (iOS `decodeP50`). */
+    val decodeP50: Double = 0.0,
+    val decodeP95: Double = 0.0,
     val offsetKnown: Boolean = false,
 )
 

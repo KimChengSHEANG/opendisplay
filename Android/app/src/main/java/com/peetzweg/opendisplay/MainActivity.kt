@@ -33,6 +33,7 @@ import com.peetzweg.opendisplay.session.InstallId
 import com.peetzweg.opendisplay.session.PanelMetrics
 import com.peetzweg.opendisplay.session.PerfStats
 import com.peetzweg.opendisplay.session.ReceiverSession
+import com.peetzweg.opendisplay.session.SessionTelemetry
 import com.peetzweg.opendisplay.settings.AppSettings
 import com.peetzweg.opendisplay.settings.ConnectionMode
 import com.peetzweg.opendisplay.sleep.HostSleepController
@@ -372,7 +373,14 @@ class MainActivity : ComponentActivity() {
         }
 
         override fun onPerf(stats: PerfStats) {
-            runOnUiThread { perf = stats }
+            // The session times the network; the decoder times the panel.
+            // Join them here — the only object that holds both.
+            val decode = decoder?.timings?.snapshot().orEmpty()
+            val merged = stats.copy(
+                decodeP50 = SessionTelemetry.percentile(decode, 0.5),
+                decodeP95 = SessionTelemetry.percentile(decode, 0.95),
+            )
+            runOnUiThread { perf = merged }
         }
 
         override fun onControl(map: Map<String, Any>) {
