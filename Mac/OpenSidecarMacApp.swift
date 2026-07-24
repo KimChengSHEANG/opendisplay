@@ -272,7 +272,9 @@ final class SenderController: ObservableObject {
         }
         adbWatcher = AdbDeviceWatcher { [weak self] devices in
             guard let self else { return }
+            let detached = Set(self.androidDevices.map(\.serial)).subtracting(devices.map(\.serial))
             self.androidDevices = devices
+            self.androidDetached(detached)
             self.autoConnect()
         }
         adbWatcher?.start()
@@ -526,6 +528,23 @@ final class SenderController: ObservableObject {
         }
     }
 
+    /// Cable pulled on an Android receiver: `adb devices` no longer lists the
+    /// serial. Unlike usbmux there's no WiFi failover for the forward tunnel —
+    /// end the session outright and tear down the (now-dangling) `adb forward`
+    /// so a replug starts clean. The device's WiFi service, if advertised,
+    /// remains available to connect to separately.
+    private func androidDetached(_ detachedSerials: Set<String>) {
+        guard !detachedSerials.isEmpty else { return }
+        for serial in detachedSerials {
+            let id = ConnectionTarget.androidUsb(serial: serial).sessionID
+            if let session = session(for: id) {
+                Log.info("adb device \(serial) detached — ending session \(id)")
+                end(session)
+            }
+            try? Adb.clearForward(serial: serial)
+        }
+    }
+
     /// A quit receiver app loses its Bonjour advertisement within ~1s, far
     /// faster than WiFi dial timeouts can notice (dials to a withdrawn
     /// service stall rather than getting refused). Report the withdrawal to
@@ -569,11 +588,22 @@ final class SenderController: ObservableObject {
         let cabledNames = Set(usbDevices.compactMap { device in
             session(for: "usb:\(device.udid)") != nil ? device.name : nil
         })
+        // Install ids currently served over the Android forward-USB cable.
+        // Same rule as iPhone/iPad usbmux: the cable wins over WiFi for the
+        // same physical device (the receiver holds one connection, so a WiFi
+        // twin would fight the cable for it). Matched on the install id from
+        // hello, so it fires the moment the androidUsb session identifies.
+        let androidCabledInstallIDs = Set(sessions.compactMap { s -> String? in
+            if case .androidUsb = s.target { return s.deviceID }
+            return nil
+        })
         for s in sessions {
             guard case .wifi(let result) = s.target else { continue }
             let duplicate = (s.deviceID.map { usbSessionIDs.contains($0) } ?? false)
                 || (txtID(of: result).map { usbSessionIDs.contains($0) } ?? false)
                 || (serviceName(of: result).map { cabledNames.contains($0) } ?? false)
+                || (s.deviceID.map { androidCabledInstallIDs.contains($0) } ?? false)
+                || (txtID(of: result).map { androidCabledInstallIDs.contains($0) } ?? false)
             if duplicate {
                 Log.info("two sessions for one device — keeping the cable, dropping \(s.id)")
                 end(s)
