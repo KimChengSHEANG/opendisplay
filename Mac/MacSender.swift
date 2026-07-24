@@ -63,6 +63,51 @@ enum StreamQuality: String, CaseIterable {
     }
 }
 
+/// Logical size of the virtual display relative to the receiver panel.
+/// Unlike [StreamQuality], this changes macOS desktop workspace size (points),
+/// not only encode sharpness — "More Space" packs more UI onto Chromebooks
+/// and large Android panels; "Larger Text" does the opposite.
+enum DisplayResolution: String, CaseIterable, Identifiable {
+    case largerText
+    case standard
+    case moreSpace
+
+    var id: String { rawValue }
+
+    /// Multiplier applied to native HiDPI points (`panelPixels / 2`).
+    var pointScale: Double {
+        switch self {
+        case .largerText: return 0.75
+        case .standard: return 1.0
+        case .moreSpace: return 1.25
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .largerText: return "Larger Text"
+        case .standard: return "Standard"
+        case .moreSpace: return "More Space"
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .largerText: return "Fewer points — bigger UI, less desktop space."
+        case .standard: return "Native HiDPI match to the device panel."
+        case .moreSpace: return "More points — denser desktop; slight soft-scale on the panel."
+        }
+    }
+
+    /// Sensible default when the user hasn't picked one yet.
+    static func `default`(forDeviceKind kind: String?) -> DisplayResolution {
+        // Chromebook / large ARC windows report laptop-class pixel counts; the
+        // phone-oriented Standard (pixels/2) leaves the Mac desktop feeling cramped.
+        if kind == "Chromebook" { return .moreSpace }
+        return .standard
+    }
+}
+
 struct PhoneInfo: Decodable {
     let pixelsWide: Int   // landscape-oriented (long edge)
     let pixelsHigh: Int
@@ -120,6 +165,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private let endpointName: String
     private let mode: CaptureMode
     private let quality: StreamQuality
+    private let displayResolution: DisplayResolution
     // Stable per-device serial for the virtual display, so macOS can tell
     // multiple OpenDisplay monitors apart and persist their arrangement.
     private let displaySerial: UInt32
@@ -230,12 +276,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var lastCaptureAt = Date.distantPast
 
     init(transport: SenderTransport, name: String, mode: CaptureMode,
-         quality: StreamQuality = .best, displaySerial: UInt32 = 0x0001,
+         quality: StreamQuality = .best,
+         displayResolution: DisplayResolution = .standard,
+         displaySerial: UInt32 = 0x0001,
          awaitingWake: Bool = false) {
         self.transport = transport
         self.endpointName = name
         self.mode = mode
         self.quality = quality
+        self.displayResolution = displayResolution
         self.displaySerial = displaySerial
         self.awaitingWake = awaitingWake
         super.init()
@@ -309,12 +358,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// phone dimensions. Called at startup and again whenever the phone
     /// rotates (it re-sends hello with swapped dimensions).
     private func setupExtend(_ info: PhoneInfo) async throws {
-        Log.info("phone hello: \(info.pixelsWide)x\(info.pixelsHigh) @\(info.scale)x")
+        Log.info("phone hello: \(info.pixelsWide)x\(info.pixelsHigh) @\(info.scale)x resolution=\(displayResolution.rawValue)")
 
         // Phone panel is @3x; the virtual display runs @2x HiDPI, so points
-        // = native pixels / 2 (rounded down to even for the encoder).
-        let pointsWide = (info.pixelsWide / 2) & ~1
-        let pointsHigh = (info.pixelsHigh / 2) & ~1
+        // = native pixels / 2 (rounded down to even for the encoder). Per-device
+        // DisplayResolution then scales that workspace ("More Space" / "Larger Text").
+        let nativeWide = info.pixelsWide / 2
+        let nativeHigh = info.pixelsHigh / 2
+        let pointsWide = max(2, Int(Double(nativeWide) * displayResolution.pointScale) & ~1)
+        let pointsHigh = max(2, Int(Double(nativeHigh) * displayResolution.pointScale) & ~1)
         // Rough physical size so macOS picks a sane default UI scale.
         let mm = info.pixelsWide >= info.pixelsHigh
             ? CGSize(width: 147, height: 68)

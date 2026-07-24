@@ -197,6 +197,12 @@ final class SenderController: ObservableObject {
     @Published var quality = StreamQuality(rawValue: UserDefaults.standard.string(forKey: "quality") ?? "") ?? .best {
         didSet { UserDefaults.standard.set(quality.rawValue, forKey: "quality") }
     }
+    /// Per-device virtual-display size ("Larger Text" / "Standard" / "More Space"),
+    /// keyed by install id (preferred) or session/entry id. Survives reconnects.
+    @Published private var resolutionByDevice: [String: String] =
+        UserDefaults.standard.dictionary(forKey: "resolutionByDevice") as? [String: String] ?? [:] {
+        didSet { UserDefaults.standard.set(resolutionByDevice, forKey: "resolutionByDevice") }
+    }
 
     var running: Bool { !sessions.isEmpty }
 
@@ -771,6 +777,113 @@ final class SenderController: ObservableObject {
         return hash == 0 ? 1 : hash
     }
 
+    /// Preference key for a live session — install id once known, else session id.
+    func resolutionKey(for session: DeviceSession) -> String {
+        session.deviceID ?? session.id
+    }
+
+    func resolution(for session: DeviceSession) -> DisplayResolution {
+        resolution(forKey: resolutionKey(for: session), kind: session.deviceKind)
+    }
+
+    func resolution(for entry: DeviceEntry) -> DisplayResolution {
+        if let session = session(for: entry) {
+            return resolution(for: session)
+        }
+        if let target = entry.preferredTarget {
+            return resolvedResolution(for: target)
+        }
+        return resolution(forKey: entry.id, kind: entry.kindHint)
+    }
+
+    private func resolution(forKey key: String, kind: String?) -> DisplayResolution {
+        if let raw = resolutionByDevice[key], let value = DisplayResolution(rawValue: raw) {
+            return value
+        }
+        return DisplayResolution.default(forDeviceKind: kind)
+    }
+
+    /// Persist a per-device display size and rebuild that session so the
+    /// virtual display picks up the new point size immediately.
+    func setResolution(_ preset: DisplayResolution, for session: DeviceSession) {
+        let current = resolution(for: session)
+        let key = resolutionKey(for: session)
+        resolutionByDevice[key] = preset.rawValue
+        if let installID = session.deviceID {
+            resolutionByDevice[installID] = preset.rawValue
+        }
+        // Also stamp transport keys so a later Connect on the same row hits
+        // the same preference before hello arrives.
+        for key in resolutionLookupKeys(for: session.target) {
+            resolutionByDevice[key] = preset.rawValue
+        }
+        guard current != preset else { return }
+        let target = session.target
+        disconnect(session)
+        connect(to: target, userInitiated: true)
+    }
+
+    /// Save preference for a device-list row; reconnects if that device is live.
+    func setResolution(_ preset: DisplayResolution, for entry: DeviceEntry) {
+        if let session = session(for: entry) {
+            setResolution(preset, for: session)
+            return
+        }
+        resolutionByDevice[entry.id] = preset.rawValue
+        if let target = entry.usbTarget {
+            for key in resolutionLookupKeys(for: target) {
+                resolutionByDevice[key] = preset.rawValue
+            }
+        }
+        if let target = entry.wifiTarget {
+            for key in resolutionLookupKeys(for: target) {
+                resolutionByDevice[key] = preset.rawValue
+            }
+        }
+    }
+
+    private func resolvedResolution(for target: ConnectionTarget) -> DisplayResolution {
+        let keys = resolutionLookupKeys(for: target)
+        for key in keys {
+            if let raw = resolutionByDevice[key], let value = DisplayResolution(rawValue: raw) {
+                return value
+            }
+        }
+        let kind = keys.compactMap { knownReceiverKinds[$0] }.first
+            ?? kindHint(for: target)
+        return DisplayResolution.default(forDeviceKind: kind)
+    }
+
+    private func resolutionLookupKeys(for target: ConnectionTarget) -> [String] {
+        var keys: [String] = [target.sessionID]
+        switch target {
+        case .usb(let udid?):
+            if let id = installIDByUDID[udid] { keys.insert(id, at: 0) }
+        case .androidUsb(let serial):
+            if let id = installIDByAdbSerial[serial] { keys.insert(id, at: 0) }
+            keys.append("adb:\(serial)")
+        case .wifi(let result):
+            if let id = txtID(of: result) { keys.insert(id, at: 0) }
+            if let name = serviceName(of: result) { keys.append("wifi:\(name)") }
+        case .usb(nil):
+            break
+        }
+        return keys
+    }
+
+    private func kindHint(for target: ConnectionTarget) -> String? {
+        switch target {
+        case .androidUsb(let serial):
+            return knownReceiverKinds["adb:\(serial)"]
+                ?? (androidDevices.first(where: { $0.serial == serial })?.isChromebook == true
+                    ? "Chromebook" : nil)
+        case .wifi(let result):
+            return androidKindHint(forWiFi: result)
+        case .usb:
+            return nil
+        }
+    }
+
     func connect(to target: ConnectionTarget, userInitiated: Bool = false,
                  awaitingWake: Bool = false) {
         // While the Mac is asleep/locked, don't start sessions — the display
@@ -848,8 +961,10 @@ final class SenderController: ObservableObject {
         }
 
         let name = label(for: target)
+        let displayResolution = resolvedResolution(for: target)
         let sender = MacSender(transport: transport, name: name, mode: mode,
-                               quality: quality, displaySerial: Self.displaySerial(for: id),
+                               quality: quality, displayResolution: displayResolution,
+                               displaySerial: Self.displaySerial(for: id),
                                awaitingWake: awaitingWake)
         let session = DeviceSession(id: id, target: target, name: name, sender: sender)
         if case .wifi(let result) = target {
@@ -863,6 +978,12 @@ final class SenderController: ObservableObject {
             guard let self, let session else { return }
             session.deviceID = info.id
             session.deviceKind = info.device
+            // Migrate a session-id preference onto the durable install id.
+            if let installID = info.id,
+               self.resolutionByDevice[installID] == nil,
+               let raw = self.resolutionByDevice[session.id] {
+                self.resolutionByDevice[installID] = raw
+            }
             if let kind = info.device {
                 self.rememberReceiverKind(kind, installID: info.id, target: session.target)
             }
@@ -1258,6 +1379,21 @@ struct ContentView: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
+                                Picker(
+                                    "Resolution",
+                                    selection: Binding(
+                                        get: { controller.resolution(for: entry) },
+                                        set: { controller.setResolution($0, for: entry) }
+                                    )
+                                ) {
+                                    ForEach(DisplayResolution.allCases) { option in
+                                        Text(option.label).tag(option)
+                                    }
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.menu)
+                                .controlSize(.small)
+                                .frame(width: 120)
                                 if let target = entry.preferredTarget {
                                     Button("Connect") {
                                         controller.connect(to: target, userInitiated: true)
@@ -1429,7 +1565,7 @@ struct CheckForUpdatesView: View {
     }
 }
 
-/// One connected device: live status, throughput, reconnect + disconnect.
+/// One connected device: live status, throughput, resolution, reconnect + disconnect.
 struct SessionRow: View {
     let title: String
     @ObservedObject var session: DeviceSession
@@ -1446,33 +1582,61 @@ struct SessionRow: View {
         return .orange
     }
 
+    private var resolutionBinding: Binding<DisplayResolution> {
+        Binding(
+            get: { controller.resolution(for: session) },
+            set: { controller.setResolution($0, for: session) }
+        )
+    }
+
     var body: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 9, height: 9)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                Text("\(session.transportLabel) · \(session.status)")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 9, height: 9)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                    Text("\(session.transportLabel) · \(session.status)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer()
+                if session.mbps > 0 {
+                    Text("\(String(format: "%.1f", session.mbps)) Mbit/s")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                Button {
+                    session.sender.forceReconnect()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .controlSize(.small)
+                .help("Drop the connection and pair with the device again")
+                Button("Disconnect") { controller.disconnect(session) }
+                    .controlSize(.small)
+            }
+            HStack(spacing: 8) {
+                Text("Resolution")
                     .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("Resolution", selection: resolutionBinding) {
+                    ForEach(DisplayResolution.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .frame(maxWidth: 140, alignment: .leading)
+                Text(resolutionBinding.wrappedValue.explanation)
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
-            Spacer()
-            if session.mbps > 0 {
-                Text("\(String(format: "%.1f", session.mbps)) Mbit/s")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-            Button {
-                session.sender.forceReconnect()
-            } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-            .controlSize(.small)
-            .help("Drop the connection and pair with the device again")
-            Button("Disconnect") { controller.disconnect(session) }
-                .controlSize(.small)
+            .padding(.leading, 17)
         }
     }
 }
