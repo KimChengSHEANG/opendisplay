@@ -54,6 +54,7 @@ dependencies {
     implementation(libs.androidx.material3)
 
     testImplementation(libs.junit)
+    testImplementation(libs.org.json)
 
     debugImplementation(libs.androidx.ui.tooling)
 }
