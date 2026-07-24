@@ -69,8 +69,8 @@ fun StreamingScreen(
                         override fun surfaceCreated(holder: SurfaceHolder) {
                             // VDA hardware paints solid green on Cheets even
                             // with SurfaceView; software AVC is the reliable
-                            // path. Mac caps Chromebook encode (~1600p@30) so
-                            // OMX.google stays interactive.
+                            // path. Mac encodes up to ~2400p@30 so OMX.google
+                            // stays sharp enough on Cheets panels.
                             onSurfaceReady(
                                 VideoDecoder(
                                     holder.surface,

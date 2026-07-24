@@ -64,10 +64,10 @@ enum StreamQuality: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Per-device default when nothing is saved yet. Chromebook prefers Balanced
-    /// (software decode); others fall back to the global Default bandwidth.
+    /// Per-device default when nothing is saved yet. Chromebook uses Best so
+    /// the stream matches the panel; fps stays at 30 for software decode load.
     static func `default`(forDeviceKind kind: String?, global: StreamQuality) -> StreamQuality {
-        if kind == "Chromebook" { return .balanced }
+        if kind == "Chromebook" { return .best }
         return global
     }
 }
@@ -498,8 +498,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     /// Capture/encode size for the virtual display framebuffer.
-    /// Chromebook software AVC stays interactive with a long-edge cap; bandwidth
-    /// and fps come from the per-device presets (no longer hard-forced).
+    /// Chromebook software AVC: allow up to panel-class long edge (2400) so
+    /// Standard/Best stay sharp; Bandwidth/fps presets still control load.
     private static func capturePlan(
         pointsWide: Int, pointsHigh: Int,
         quality: StreamQuality, frameRate: StreamFrameRate, deviceKind: String?
@@ -507,7 +507,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let scale = quality.scale
         let bitrate = quality.bitrate
         let fps = frameRate.rawValue
-        let maxLongEdge = deviceKind == "Chromebook" ? 1600 : Int.max
+        // Soft ceiling for ARC software decode — was 1600 and looked soft on
+        // 2400-class Cheets panels; 2400 matches native HiDPI framebuffer.
+        let maxLongEdge = deviceKind == "Chromebook" ? 2400 : Int.max
         var width = max(2, Int(Double(pointsWide * 2) * scale) & ~1)
         var height = max(2, Int(Double(pointsHigh * 2) * scale) & ~1)
         let longEdge = max(width, height)
