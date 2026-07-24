@@ -71,7 +71,42 @@ of these instead:
    ```
 4. Tap **Allow** on the Chromebook debugging prompt.
 
-**B. Install from Linux on the Chromebook**
+### Chromebook USB cable (Developer Mode)
+
+Most Chromebooks still won’t appear in `adb devices` over USB-C without extra
+ChromeOS setup. With **Developer Mode** already on:
+
+1. Settings → **Advanced → Developers → Linux** → **Develop Android apps →
+   Enable ADB debugging** (if not already).
+2. On the Chromebook press **Ctrl+Alt+T** (crosh), then:
+   ```sh
+   shell
+   sudo crossystem dev_enable_udc=1
+   sudo reboot
+   ```
+3. After reboot, Ctrl+Alt+T → `shell` again. Plug a **data-capable** USB-C
+   cable into a supported port (try each port), then:
+   ```sh
+   sudo ectool usbpd 0 dr_swap
+   # if still invisible on the Mac, try the other port:
+   sudo ectool usbpd 1 dr_swap
+   ```
+   Re-run `dr_swap` every time you unplug/replug the cable.
+4. On the Mac:
+   ```sh
+   adb kill-server
+   adb devices -l
+   ```
+   You want a **USB** serial (hex id, no `host:port`). Tap **Allow** on the
+   Chromebook if prompted.
+5. OpenDisplay auto-connects that serial over `adb forward` (same path as
+   Android phones). Transport shows as **USB**.
+
+If `adb devices` stays empty over the cable, this Chromebook model likely
+lacks USB ADB gadget support — use WiFi Bonjour or `adb connect <ip>` instead.
+Google documents USB ADB as working only on a **small set of devices**.
+
+**B. Install from Linux on the Chromebook** (no Mac USB)
 
 1. Same ADB-debugging toggle as above.
 2. Chromebook **Terminal** (Linux):

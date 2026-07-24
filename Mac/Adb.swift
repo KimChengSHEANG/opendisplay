@@ -10,16 +10,36 @@
 
 import Foundation
 
-/// A device reported by `adb devices`. `authorized` is false while the phone
-/// still shows the "Allow USB debugging?" prompt (adb state `unauthorized`).
+/// A device reported by `adb devices -l`. `authorized` is false while the
+/// phone still shows the "Allow USB debugging?" prompt (adb state
+/// `unauthorized`).
 struct AdbDevice: Identifiable, Hashable {
     let serial: String
     var authorized: Bool
+    /// From `model:` in `adb devices -l` (e.g. `Samsung_Chromebook_Plus`).
+    var model: String? = nil
+    /// From `product:` / `device:` (e.g. `kevin`, `kevin_cheets`).
+    var product: String? = nil
 
     var id: String { serial }
+
     /// USB cable serials look like hex; `adb connect` uses `host:port`.
+    var isNetwork: Bool { serial.contains(":") }
+
+    var isChromebook: Bool {
+        let hay = [model, product, serial].compactMap { $0?.lowercased() }.joined(separator: " ")
+        return hay.contains("chromebook") || hay.contains("chromeos")
+            || hay.contains("_cheets") || hay.contains("-cheets")
+    }
+
     var label: String {
-        serial.contains(":") ? "Android (ADB network)" : "Android (USB)"
+        let name = model?.replacingOccurrences(of: "_", with: " ")
+        if isChromebook {
+            let base = name ?? "Chromebook"
+            return isNetwork ? "\(base) (ADB network)" : "\(base) (USB)"
+        }
+        if let name { return isNetwork ? "\(name) (ADB network)" : "\(name) (USB)" }
+        return isNetwork ? "Android (ADB network)" : "Android (USB)"
     }
 }
 
@@ -69,21 +89,36 @@ enum Adb {
 
     // MARK: - Commands
 
-    /// Parse `adb devices` into attached devices, keeping their authorization
-    /// state so the UI can distinguish "tap Allow on the phone" from "ready".
+    /// Parse `adb devices -l` into attached devices, keeping authorization
+    /// state and model/product so Chromebooks label correctly over USB.
     static func devices() throws -> [AdbDevice] {
-        let out = try run(["devices"])
+        let out = try run(["devices", "-l"])
         var result: [AdbDevice] = []
         // Skip the "List of devices attached" header; each line is
-        // "<serial>\t<state>". States other than device/unauthorized
-        // (offline, no permissions) are transient — drop them.
+        // "<serial> <state> [key:value ...]".
         for line in out.split(separator: "\n").dropFirst() {
             let parts = line.split(whereSeparator: { $0 == "\t" || $0 == " " })
                 .map(String.init).filter { !$0.isEmpty }
             guard parts.count >= 2 else { continue }
+            let serial = parts[0]
             let state = parts[1]
             guard state == "device" || state == "unauthorized" else { continue }
-            result.append(AdbDevice(serial: parts[0], authorized: state == "device"))
+            var model: String?
+            var product: String?
+            for token in parts.dropFirst(2) {
+                if token.hasPrefix("model:"), model == nil {
+                    model = String(token.dropFirst("model:".count))
+                } else if token.hasPrefix("product:"), product == nil {
+                    product = String(token.dropFirst("product:".count))
+                } else if token.hasPrefix("device:"), product == nil {
+                    product = String(token.dropFirst("device:".count))
+                }
+            }
+            result.append(AdbDevice(
+                serial: serial,
+                authorized: state == "device",
+                model: model,
+                product: product))
         }
         return result
     }

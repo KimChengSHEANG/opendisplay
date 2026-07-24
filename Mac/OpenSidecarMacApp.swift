@@ -1052,15 +1052,22 @@ final class SenderController: ObservableObject {
             }
             let kind = knownReceiverKinds["adb:\(device.serial)"]
                 ?? twin.flatMap { androidKindHint(forWiFi: $0) }
-                ?? "Android"
+                ?? (device.isChromebook ? "Chromebook" : "Android")
             let displayName = twin.flatMap(serviceName)
-                ?? (device.authorized ? device.label : "\(device.label) — tap Allow on phone")
+                ?? (device.authorized
+                    ? device.label
+                    : "\(device.label) — tap Allow on device")
             entries.append(DeviceEntry(
                 id: "android:\(device.serial)",
                 name: displayName,
                 usbTarget: device.authorized ? target : nil,
                 wifiTarget: twin.map { .wifi($0) },
-                kindHint: kind == "Chromebook" ? kind : "Android"))
+                kindHint: kind == "Chromebook" ? kind : (device.isChromebook ? "Chromebook" : "Android"))
+            )
+            // Seed kind so WiFi rows / future plugs recognize this Chromebook.
+            if device.isChromebook {
+                knownReceiverKinds["adb:\(device.serial)"] = "Chromebook"
+            }
         }
         for result in discovered {
             guard let name = serviceName(of: result), !mergedServices.contains(name)
@@ -1180,7 +1187,11 @@ struct ContentView: View {
             Form {
                 Section("Devices") {
                     if !controller.adbInstalled {
-                        Text("Android USB requires adb (Android platform-tools). Install with `brew install --cask android-platform-tools`, enable USB debugging on the phone, and tap Allow when prompted.")
+                        Text("Android / Chromebook USB requires adb (Android platform-tools). Install with `brew install --cask android-platform-tools`, enable USB debugging on the device, and tap Allow when prompted.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Chromebook USB cable: Developer Mode + `sudo crossystem dev_enable_udc=1` (reboot), then each plug `sudo ectool usbpd 0 dr_swap` (try port 1 if needed). See Android/README.md. Not all models support USB ADB — WiFi or `adb connect <ip>` always works.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
