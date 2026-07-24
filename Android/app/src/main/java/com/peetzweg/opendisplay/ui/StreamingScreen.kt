@@ -3,15 +3,12 @@ package com.peetzweg.opendisplay.ui
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.PixelFormat
-import android.graphics.SurfaceTexture
 import android.os.Build
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.PointerIcon
-import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import android.view.TextureView
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -32,9 +29,11 @@ import java.util.Base64
  * Fullscreen video surface the Mac's stream is decoded onto, with a sibling
  * [ImageView] for the local cursor sprite.
  *
- * ChromeOS ARC: [SurfaceView] + hardware `c2.vda.avc.decoder` (full panel).
- * TextureView + VDA historically painted solid green on Cheets; SurfaceView
- * is the BufferQueue path VDA expects. Phones/tablets keep [TextureView] + HW.
+ * Every device gets [SurfaceView]: ChromeOS ARC pairs it with the hardware
+ * `c2.vda.avc.decoder` (full panel) — SurfaceView is the BufferQueue path VDA
+ * expects. Phones and tablets get SurfaceView too, so SurfaceFlinger can
+ * promote it to a hardware overlay, and use their own hardware AVC decoder
+ * via `MediaCodec.createDecoderByType`.
  * Cursor position is applied by [cursorController] directly (not Compose).
  */
 @Composable
@@ -70,83 +69,52 @@ fun StreamingScreen(
                 isClickable = false
                 isFocusable = false
             }
-            val video: View = if (chromebook) {
-                SurfaceView(context).also { surfaceView ->
-                    // Default z-order (hole-punch): sibling ImageView draws above
-                    // the surface. Media-overlay / on-top would hide the cursor.
-                    surfaceView.holder.setFormat(PixelFormat.OPAQUE)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        surfaceView.pointerIcon = PointerIcon.getSystemIcon(
-                            context,
-                            PointerIcon.TYPE_NULL,
+            // SurfaceView on every device: it is the BufferQueue path the ARC
+            // VDA decoder expects AND the one SurfaceFlinger can hand a
+            // hardware overlay — Android's nearest equivalent to the dedicated
+            // video plane iOS gives AVSampleBufferDisplayLayer. TextureView
+            // (the old phone/tablet path) is always GPU-composited through the
+            // View tree, costing about a frame, and sized its buffer from the
+            // view at first layout — which on connect is the pre-immersive
+            // window, quietly downscaling a native-resolution stream.
+            val video: View = SurfaceView(context).also { surfaceView ->
+                // Default z-order (hole-punch): the sibling ImageView draws
+                // above the surface. Media-overlay / on-top would hide the cursor.
+                surfaceView.holder.setFormat(PixelFormat.OPAQUE)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    surfaceView.pointerIcon = PointerIcon.getSystemIcon(
+                        context,
+                        PointerIcon.TYPE_NULL,
+                    )
+                }
+                var started = false
+                surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
+                    override fun surfaceCreated(holder: SurfaceHolder) {}
+
+                    override fun surfaceChanged(
+                        holder: SurfaceHolder,
+                        format: Int,
+                        width: Int,
+                        height: Int,
+                    ) {
+                        // Wait for a real size before binding the decoder — a
+                        // 0×0 surface is a common ARC green-screen trigger.
+                        if (started || width <= 0 || height <= 0) return
+                        started = true
+                        onSurfaceReady(
+                            VideoDecoder(
+                                holder.surface,
+                                preferSoftware = false,
+                                preferHardwareAvc = chromebook,
+                            ),
                         )
                     }
-                    var started = false
-                    surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-                        override fun surfaceCreated(holder: SurfaceHolder) {}
 
-                        override fun surfaceChanged(
-                            holder: SurfaceHolder,
-                            format: Int,
-                            width: Int,
-                            height: Int,
-                        ) {
-                            // Wait for a real size before binding VDA — a 0×0
-                            // surface is a common ARC green-screen trigger.
-                            if (started || width <= 0 || height <= 0) return
-                            started = true
-                            onSurfaceReady(
-                                VideoDecoder(
-                                    holder.surface,
-                                    preferSoftware = false,
-                                    preferHardwareAvc = true,
-                                ),
-                            )
-                        }
-
-                        override fun surfaceDestroyed(holder: SurfaceHolder) {
-                            started = false
-                            onSurfaceDestroyed()
-                        }
-                    })
-                }
-            } else {
-                TextureView(context).also { texture ->
-                    texture.isOpaque = true
-                    var codecSurface: Surface? = null
-                    texture.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                        override fun onSurfaceTextureAvailable(
-                            st: SurfaceTexture,
-                            width: Int,
-                            height: Int,
-                        ) {
-                            val w = width.coerceAtLeast(1280)
-                            val h = height.coerceAtLeast(720)
-                            st.setDefaultBufferSize(w, h)
-                            codecSurface?.release()
-                            val surface = Surface(st)
-                            codecSurface = surface
-                            onSurfaceReady(VideoDecoder(surface, preferSoftware = false))
-                        }
-
-                        override fun onSurfaceTextureSizeChanged(
-                            st: SurfaceTexture,
-                            width: Int,
-                            height: Int,
-                        ) {
-                            if (width > 0 && height > 0) st.setDefaultBufferSize(width, height)
-                        }
-
-                        override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
-                            onSurfaceDestroyed()
-                            codecSurface?.release()
-                            codecSurface = null
-                            return true
-                        }
-
-                        override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+                    override fun surfaceDestroyed(holder: SurfaceHolder) {
+                        started = false
+                        onSurfaceDestroyed()
                     }
-                }
+                })
             }
             root.addView(
                 video,
