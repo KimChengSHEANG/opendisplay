@@ -105,10 +105,16 @@ class VideoDecoder(private val surface: Surface) {
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, DEFAULT_WIDTH, DEFAULT_HEIGHT)
         format.setByteBuffer("csd-0", ByteBuffer.wrap(START_CODE + sps))
         format.setByteBuffer("csd-1", ByteBuffer.wrap(START_CODE + pps))
-        val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        c.configure(format, surface, null, 0)
-        c.start()
-        codec = c
+        try {
+            val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            c.configure(format, surface, null, 0)
+            c.start()
+            codec = c
+        } catch (_: Exception) {
+            // Surface gone / unsupported stream / ARC decoder glitch — drop
+            // until the next SPS/PPS keyframe retries startCodec.
+            codec = null
+        }
     }
 
     companion object {

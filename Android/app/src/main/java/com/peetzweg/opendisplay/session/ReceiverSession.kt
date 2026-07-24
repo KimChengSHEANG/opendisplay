@@ -8,6 +8,7 @@ import java.io.IOException
 import java.io.OutputStream
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.Executors
 
 /**
  * TCP receiver session: listens for the Mac sender to connect, sends `hello`
@@ -16,7 +17,9 @@ import java.net.Socket
  *
  * v1: a background accept thread + one background read thread per
  * connection. Only one client is served at a time — a new connection
- * replaces the previous one.
+ * replaces the previous one. All socket writes go through [writeExecutor]
+ * so UI-thread callers (touch, rotation `hello`, keyframe requests) never
+ * hit `NetworkOnMainThreadException` under StrictMode (ChromeOS ARC).
  */
 class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener: Listener) {
 
@@ -43,6 +46,10 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     @Volatile private var clientSocket: Socket? = null
     @Volatile private var outputStream: OutputStream? = null
     private val writeLock = Any()
+    /** Serializes outbound frames off the caller's thread (UI / accept / read). */
+    private val writeExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "ReceiverSession-write").apply { isDaemon = true }
+    }
 
     val isConnected: Boolean get() = clientSocket != null
 
@@ -196,14 +203,20 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     }
 
     private fun sendFrame(payload: ByteArray) {
-        val out = outputStream ?: return
+        // Encode on the caller (cheap); write on the dedicated thread so touch /
+        // Compose / configuration callbacks stay StrictMode-clean.
+        if (outputStream == null) return
         val framed = FrameCodec.encode(payload)
-        synchronized(writeLock) {
-            try {
-                out.write(framed)
-                out.flush()
-            } catch (e: IOException) {
-                listener.onStatus("send-error:${e.message}")
+        writeExecutor.execute {
+            val out = outputStream ?: return@execute
+            synchronized(writeLock) {
+                val stream = outputStream ?: return@synchronized
+                try {
+                    stream.write(framed)
+                    stream.flush()
+                } catch (e: IOException) {
+                    listener.onStatus("send-error:${e.message}")
+                }
             }
         }
     }
