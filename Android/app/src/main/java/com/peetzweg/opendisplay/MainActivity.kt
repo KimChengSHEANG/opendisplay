@@ -41,6 +41,10 @@ class MainActivity : ComponentActivity() {
     private var advertiser: DiscoveryAdvertiser? = null
     private var savedBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
     private var lockReceiverRegistered = false
+    /** True between [onStart] and [onStop]; gates [resumeAccepting] while backgrounded. */
+    private var activityStarted = false
+    /** Set when unlock arrives before the activity is visible again. */
+    private var pendingResumeAccepting = false
 
     /** Wires Android window/lock/session APIs to the pure sleep state machine — see `HostSleepController`. */
     private val hostSleep = HostSleepController(
@@ -54,7 +58,14 @@ class MainActivity : ComponentActivity() {
             session?.stop()
             connected = false
         },
-        resumeAccepting = { session?.start() },
+        resumeAccepting = {
+            if (activityStarted) {
+                session?.start()
+                pendingResumeAccepting = false
+            } else {
+                pendingResumeAccepting = true
+            }
+        },
     )
 
     private val lockReceiver = object : BroadcastReceiver() {
@@ -71,6 +82,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!lockReceiverRegistered) {
+            val filter = IntentFilter(Intent.ACTION_SCREEN_OFF).apply { addAction(Intent.ACTION_USER_PRESENT) }
+            ContextCompat.registerReceiver(this, lockReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+            lockReceiverRegistered = true
+        }
         setContent {
             OpenDisplayApp(
                 connected = connected,
@@ -91,38 +107,39 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        if (!lockReceiverRegistered) {
-            val filter = IntentFilter(Intent.ACTION_SCREEN_OFF).apply { addAction(Intent.ACTION_USER_PRESENT) }
-            ContextCompat.registerReceiver(this, lockReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
-            lockReceiverRegistered = true
-        }
-        if (session != null) return
-        val metrics = resources.displayMetrics
-        val installId = InstallId.get(this)
-        val s = ReceiverSession(listener = ReceiverListener())
-        s.installId = installId
-        s.device = ReceiverSession.deviceKind(this)
-        s.pixelsWide = metrics.widthPixels
-        s.pixelsHigh = metrics.heightPixels
-        s.scale = metrics.density.toDouble()
-        s.start()
-        session = s
+        activityStarted = true
+        if (session == null) {
+            val metrics = resources.displayMetrics
+            val installId = InstallId.get(this)
+            val s = ReceiverSession(listener = ReceiverListener())
+            s.installId = installId
+            s.device = ReceiverSession.deviceKind(this)
+            s.pixelsWide = metrics.widthPixels
+            s.pixelsHigh = metrics.heightPixels
+            s.scale = metrics.density.toDouble()
+            s.start()
+            session = s
 
-        val a = DiscoveryAdvertiser(this, DiscoveryAdvertiser.deviceName(this), installId)
-        a.start(port = ReceiverSession.DEFAULT_PORT)
-        advertiser = a
+            val a = DiscoveryAdvertiser(this, DiscoveryAdvertiser.deviceName(this), installId)
+            a.start(port = ReceiverSession.DEFAULT_PORT)
+            advertiser = a
+        } else if (pendingResumeAccepting) {
+            session?.start()
+            pendingResumeAccepting = false
+        }
     }
 
     override fun onStop() {
         super.onStop()
-        if (lockReceiverRegistered) {
-            unregisterReceiver(lockReceiver)
-            lockReceiverRegistered = false
-        }
+        activityStarted = false
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        if (lockReceiverRegistered) {
+            unregisterReceiver(lockReceiver)
+            lockReceiverRegistered = false
+        }
         hostSleep.onAppQuitting()
         session?.stop()
         session = null
