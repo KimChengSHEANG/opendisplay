@@ -19,9 +19,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - Enqueue is non-blocking on the network thread
  * - Every access unit is fed in order (no mid-GOP drops)
  * - `DisplayImmediately` — present as soon as decoded
+ * - Background: `renderingPaused` drops at the door; resume asks for IDR
  *
- * We mirror that with a dedicated decode thread + bounded in-order queue, and
- * only apply latest-wins on **output** buffers (skip display backlog).
+ * We mirror that with a dedicated decode thread + shallow in-order queue, wait
+ * briefly for input buffers instead of punching GOP holes, and only apply
+ * latest-wins on **output** buffers (skip display backlog).
  *
  * ChromeOS ARC: prefer `c2.vda.avc.decoder` on SurfaceView for full-panel HW.
  */
@@ -36,10 +38,9 @@ class VideoDecoder(
     private var pps: ByteArray? = null
     private val bufferInfo = MediaCodec.BufferInfo()
 
-    /** In-order AUs waiting for decode — capacity keeps latency bounded. */
+    /** Shallow queue (~Metal single-slot latency bound at AU boundary). */
     private val queue = ArrayBlockingQueue<ByteArray>(QUEUE_CAP)
     private val drainScheduled = AtomicBoolean(false)
-    private var droppedSinceKf: Int = 0
     private val decodeExecutor: ExecutorService = Executors.newSingleThreadExecutor { r ->
         Thread(r, "VideoDecoder").apply {
             isDaemon = true
@@ -47,6 +48,14 @@ class VideoDecoder(
         }
     }
     private val released = AtomicBoolean(false)
+
+    /** iOS `renderingPaused` — drop frames while backgrounded. */
+    @Volatile
+    var renderingPaused: Boolean = false
+        set(value) {
+            field = value
+            if (value) queue.clear()
+        }
 
     @Volatile
     var hasRendered: Boolean = false
@@ -58,31 +67,32 @@ class VideoDecoder(
     fun consumeNeedsKeyframe(): Boolean {
         if (!keyframeRequested) return false
         keyframeRequested = false
-        droppedSinceKf = 0
         return true
     }
 
     /**
      * Non-blocking — safe to call from the TCP reader (iOS enqueue analogue).
-     * Preserves decode order. Dropping mid-GOP is rare; we only ask for an
-     * IDR after several drops so scroll isn't hitch-spammed with keyframes.
+     * Preserves decode order. On overflow: keep an IDR if present, else ask
+     * for a keyframe — never silently drop mid-GOP P-frames into the codec.
      */
     fun feedAnnexB(frame: ByteArray) {
-        if (released.get()) return
+        if (released.get() || renderingPaused) return
         val copy = frame.copyOf()
         if (!queue.offer(copy)) {
-            noteDrop()
-            return
+            // Bound latency without punching the live GOP into the codec.
+            if (containsIdr(copy)) {
+                queue.clear()
+                if (!queue.offer(copy)) {
+                    keyframeRequested = true
+                    return
+                }
+            } else {
+                keyframeRequested = true
+                return
+            }
         }
         if (drainScheduled.compareAndSet(false, true)) {
             decodeExecutor.execute { drainQueue() }
-        }
-    }
-
-    private fun noteDrop() {
-        droppedSinceKf++
-        if (droppedSinceKf >= DROP_KF_THRESHOLD) {
-            keyframeRequested = true
         }
     }
 
@@ -106,12 +116,14 @@ class VideoDecoder(
             while (!released.get()) {
                 val frame = queue.poll() ?: break
                 synchronized(this) {
-                    if (!released.get()) decodeOne(frame)
+                    if (!released.get() && !renderingPaused) decodeOne(frame)
                 }
             }
         } finally {
             drainScheduled.set(false)
-            if (!released.get() && queue.isNotEmpty() && drainScheduled.compareAndSet(false, true)) {
+            if (!released.get() && !renderingPaused &&
+                queue.isNotEmpty() && drainScheduled.compareAndSet(false, true)
+            ) {
                 decodeExecutor.execute { drainQueue() }
             }
         }
@@ -131,14 +143,15 @@ class VideoDecoder(
         val c = codec ?: return
         try {
             drainOutput(c)
+            // Wait briefly for an input slot (iOS never skips mid-GOP).
             var index = c.dequeueInputBuffer(0)
-            if (index < 0 && isSync) {
-                index = c.dequeueInputBuffer(SYNC_TIMEOUT_US)
+            if (index < 0) {
+                index = c.dequeueInputBuffer(if (isSync) SYNC_TIMEOUT_US else INPUT_TIMEOUT_US)
             }
             if (index < 0) {
-                // Soft decode backed up — skip this AU; heal only after
-                // several misses so we don't IDR-pulse during scroll.
-                if (!isSync) noteDrop()
+                // Still blocked — don't feed a hole; resync with an IDR.
+                keyframeRequested = true
+                queue.clear()
                 drainOutput(c)
                 return
             }
@@ -265,9 +278,9 @@ class VideoDecoder(
 
     companion object {
         private const val TAG = "VideoDecoder"
-        private const val QUEUE_CAP = 8
-        /** Ask Mac for IDR only after this many undecodeable drops. */
-        private const val DROP_KF_THRESHOLD = 6
+        /** ~Metal latest-wins depth at the AU boundary (~33ms @ 60fps). */
+        private const val QUEUE_CAP = 2
+        private const val INPUT_TIMEOUT_US = 8_000L
         private const val SYNC_TIMEOUT_US = 100_000L
         private const val NAL_SPS = 7
         private const val NAL_PPS = 8

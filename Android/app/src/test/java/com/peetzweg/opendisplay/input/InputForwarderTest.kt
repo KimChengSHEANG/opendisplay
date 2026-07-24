@@ -136,4 +136,40 @@ class InputForwarderTest {
         forwarder.down(1f, 1f, 100, 100)
         assertEquals(listOf("began", "cancelled", "began"), sent.map { it["phase"] })
     }
+
+    @Test
+    fun movedSamples_sendsEveryPointThenPredicts() {
+        val sent = mutableListOf<Map<String, Any>>()
+        val forwarder = InputForwarder { sent += it }
+
+        forwarder.down(0f, 0f, 100, 100)
+        forwarder.movedSamples(listOf(10f to 10f, 20f to 20f), 100, 100)
+
+        // 2 real moves + 1 predicted (half of last delta from 10→20)
+        val moved = sent.filter { it["phase"] == "moved" }
+        assertEquals(3, moved.size)
+        assertEquals(0.1, moved[0]["x"])
+        assertEquals(0.2, moved[1]["x"])
+        assertEquals(0.25, moved[2]["x"] as Double, 1e-9)
+        assertEquals(0.25, moved[2]["y"] as Double, 1e-9)
+    }
+
+    @Test
+    fun wheel_sendsScrollPixels() {
+        val sent = mutableListOf<Map<String, Any>>()
+        val forwarder = InputForwarder { sent += it }
+
+        forwarder.wheel(3f, -12f)
+
+        assertEquals(1, sent.size)
+        assertEquals(mapOf("type" to "scroll", "dx" to 3.0, "dy" to -12.0), sent[0])
+    }
+
+    @Test
+    fun wheel_zeroDelta_isNoOp() {
+        val sent = mutableListOf<Map<String, Any>>()
+        val forwarder = InputForwarder { sent += it }
+        forwarder.wheel(0f, 0f)
+        assertEquals(0, sent.size)
+    }
 }

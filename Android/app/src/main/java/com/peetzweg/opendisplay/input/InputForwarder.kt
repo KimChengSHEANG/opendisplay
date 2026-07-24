@@ -18,6 +18,9 @@ package com.peetzweg.opendisplay.input
  * switches to two-finger scroll via [secondPointerDown]/[twoFingerMove]/
  * [secondPointerUp], mirroring iOS's `UIPanGestureRecognizer(minimum/maximum
  * NumberOfTouches = 2)`.
+ *
+ * Move/hover batches mirror iOS `coalescedTouches` — every historical sample
+ * is forwarded so the Mac gets full-rate trackpad/mouse injection.
  */
 class InputForwarder(private val send: (Map<String, Any>) -> Unit) {
 
@@ -27,69 +30,65 @@ class InputForwarder(private val send: (Map<String, Any>) -> Unit) {
     private var lastFocusY = 0f
     private var lastNormX = 0.5
     private var lastNormY = 0.5
-    private var lastHoverSendMs = 0L
-    private var pendingHoverX = 0f
-    private var pendingHoverY = 0f
-    private var pendingHoverW = 0
-    private var pendingHoverH = 0
-    private var hoverFlushPending = false
-
-    /**
-     * Optional UI-thread scheduler for trailing hover flush after coalesce.
-     * `(delayMs, runnable)` — typically `view.postDelayed`.
-     */
-    var scheduleHoverFlush: ((Long, () -> Unit) -> Unit)? = null
+    private var lastMoveX = Float.NaN
+    private var lastMoveY = Float.NaN
 
     /** First finger touches down. */
     fun down(x: Float, y: Float, width: Int, height: Int) {
         twoFingerActive = false
         multiTouchOccurred = false
+        lastMoveX = Float.NaN
+        lastMoveY = Float.NaN
         touch("began", x, y, width, height)
     }
 
     /** The single tracked finger moved. Ignored once a second finger has joined. */
     fun move(x: Float, y: Float, width: Int, height: Int) {
         if (twoFingerActive || multiTouchOccurred) return
-        touch("moved", x, y, width, height)
+        movedSamples(listOf(x to y), width, height)
+    }
+
+    /**
+     * iOS coalesced-touch analogue: forward every sample in order (historical
+     * + current), then one predicted point from the last delta (~1 frame).
+     */
+    fun movedSamples(samples: List<Pair<Float, Float>>, width: Int, height: Int) {
+        if (twoFingerActive || multiTouchOccurred) return
+        if (samples.isEmpty()) return
+        for ((x, y) in samples) {
+            touch("moved", x, y, width, height)
+        }
+        val last = samples.last()
+        val prev = if (samples.size >= 2) {
+            samples[samples.size - 2]
+        } else if (!lastMoveX.isNaN() && !lastMoveY.isNaN()) {
+            lastMoveX to lastMoveY
+        } else {
+            null
+        }
+        if (prev != null) {
+            val px = last.first + (last.first - prev.first) * PREDICT_FACTOR
+            val py = last.second + (last.second - prev.second) * PREDICT_FACTOR
+            if (px != last.first || py != last.second) {
+                touch("moved", px, py, width, height)
+            }
+        }
+        lastMoveX = last.first
+        lastMoveY = last.second
     }
 
     /**
      * Mouse/trackpad hover (no button): Mac treats touch `moved` while up as
-     * `mouseMoved`. Chromebook ARC delivers these as ACTION_HOVER_MOVE.
-     *
-     * Coalesced to ~120Hz ([HOVER_MIN_INTERVAL_MS]) so the control channel
-     * isn't flooded; a trailing flush still delivers the last sample.
+     * `mouseMoved`. Prefer [movedSamples] with MotionEvent history.
      */
     fun hover(x: Float, y: Float, width: Int, height: Int) {
-        if (twoFingerActive || multiTouchOccurred) return
-        val now = System.currentTimeMillis()
-        pendingHoverX = x
-        pendingHoverY = y
-        pendingHoverW = width
-        pendingHoverH = height
-        val elapsed = now - lastHoverSendMs
-        if (elapsed >= HOVER_MIN_INTERVAL_MS) {
-            lastHoverSendMs = now
-            hoverFlushPending = false
-            touch("moved", x, y, width, height)
-            return
-        }
-        if (!hoverFlushPending) {
-            hoverFlushPending = true
-            val delay = (HOVER_MIN_INTERVAL_MS - elapsed).coerceAtLeast(1L)
-            scheduleHoverFlush?.invoke(delay) {
-                if (!hoverFlushPending) return@invoke
-                hoverFlushPending = false
-                lastHoverSendMs = System.currentTimeMillis()
-                touch("moved", pendingHoverX, pendingHoverY, pendingHoverW, pendingHoverH)
-            }
-                ?: run {
-                    // No scheduler (unit tests): send immediately.
-                    hoverFlushPending = false
-                    lastHoverSendMs = now
-                    touch("moved", x, y, width, height)
-                }
-        }
+        movedSamples(listOf(x to y), width, height)
+    }
+
+    /** Mouse-wheel / trackpad scroll → Mac `scroll` (video pixels). */
+    fun wheel(dx: Float, dy: Float) {
+        if (dx == 0f && dy == 0f) return
+        send(mapOf("type" to "scroll", "dx" to dx.toDouble(), "dy" to dy.toDouble()))
     }
 
     /** The single tracked finger lifted. Ignored once a second finger has joined this gesture. */
@@ -99,6 +98,8 @@ class InputForwarder(private val send: (Map<String, Any>) -> Unit) {
             multiTouchOccurred = false
             return
         }
+        lastMoveX = Float.NaN
+        lastMoveY = Float.NaN
         touch("ended", x, y, width, height)
     }
 
@@ -106,6 +107,8 @@ class InputForwarder(private val send: (Map<String, Any>) -> Unit) {
     fun cancel(x: Float, y: Float, width: Int, height: Int) {
         twoFingerActive = false
         multiTouchOccurred = false
+        lastMoveX = Float.NaN
+        lastMoveY = Float.NaN
         touch("cancelled", x, y, width, height)
     }
 
@@ -122,6 +125,8 @@ class InputForwarder(private val send: (Map<String, Any>) -> Unit) {
         multiTouchOccurred = true
         lastFocusX = focusX
         lastFocusY = focusY
+        lastMoveX = Float.NaN
+        lastMoveY = Float.NaN
     }
 
     /**
@@ -152,8 +157,8 @@ class InputForwarder(private val send: (Map<String, Any>) -> Unit) {
     }
 
     companion object {
-        /** Match Mac cursor poll (120Hz) — don't outrun injection. */
-        private const val HOVER_MIN_INTERVAL_MS = 8L
+        /** Fraction of last delta to project (~half frame; iOS predictedTouches). */
+        private const val PREDICT_FACTOR = 0.5f
 
         /** View-pixel `(x, y)` within a `width`×`height` view, clamped to `[0,1]`. */
         fun normalize(x: Float, y: Float, width: Int, height: Int): Pair<Double, Double> {

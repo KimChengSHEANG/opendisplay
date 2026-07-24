@@ -164,9 +164,6 @@ fun StreamingScreen(
             // finger-down. Touch path still covers phones/tablets.
             // Local overlay follows hover immediately (iOS-style); Mac echo is
             // fallback only — see CursorController.moveLocal.
-            forwarder.scheduleHoverFlush = { delayMs, flush ->
-                root.postDelayed(flush, delayMs)
-            }
             video.isFocusable = true
             video.isFocusableInTouchMode = false
             video.setOnTouchListener { view, event ->
@@ -174,6 +171,10 @@ fun StreamingScreen(
             }
             video.setOnHoverListener { view, event ->
                 handleHover(forwarder, cursorController, view.width, view.height, event)
+            }
+            // Mouse wheel / precision scroll (Chromebook) → Mac scroll.
+            video.setOnGenericMotionListener { view, event ->
+                handleGenericMotion(forwarder, view.width, view.height, event)
             }
             root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
                 cursorController.relayout()
@@ -219,8 +220,13 @@ private fun handleTouch(
             if (event.pointerCount >= 2) {
                 forwarder.twoFingerMove(focusX(event), focusY(event))
             } else {
-                if (chromebook) moveLocalCursor(cursor, event.getX(0), event.getY(0), width, height)
-                forwarder.move(event.getX(0), event.getY(0), width, height)
+                // iOS coalescedTouches: every batched sample, then current.
+                val samples = pointerSamples(event, pointerIndex = 0)
+                if (chromebook && samples.isNotEmpty()) {
+                    val last = samples.last()
+                    moveLocalCursor(cursor, last.first, last.second, width, height)
+                }
+                forwarder.movedSamples(samples, width, height)
             }
         }
         MotionEvent.ACTION_POINTER_UP -> {
@@ -243,13 +249,55 @@ private fun handleHover(
     when (event.actionMasked) {
         MotionEvent.ACTION_HOVER_MOVE,
         MotionEvent.ACTION_HOVER_ENTER -> {
-            moveLocalCursor(cursor, event.x, event.y, width, height)
-            forwarder.hover(event.x, event.y, width, height)
+            val samples = pointerSamples(event, pointerIndex = 0)
+            if (samples.isNotEmpty()) {
+                val last = samples.last()
+                moveLocalCursor(cursor, last.first, last.second, width, height)
+            }
+            forwarder.movedSamples(samples, width, height)
             return true
         }
-        MotionEvent.ACTION_HOVER_EXIT -> return true
+        MotionEvent.ACTION_HOVER_EXIT -> {
+            cursor.endLocalDrive()
+            return true
+        }
     }
     return false
+}
+
+/** Mouse wheel → Mac pixel scroll (same wire as two-finger pan). */
+private fun handleGenericMotion(
+    forwarder: InputForwarder,
+    width: Int,
+    height: Int,
+    event: MotionEvent,
+): Boolean {
+    if (event.actionMasked != MotionEvent.ACTION_SCROLL) return false
+    val v = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
+    val h = event.getAxisValue(MotionEvent.AXIS_HSCROLL)
+    if (v == 0f && h == 0f) return false
+    // Axis units are typically ±1 per notch; scale to video pixels like a
+    // short two-finger flick (~3–5% of the short edge).
+    val unit = minOf(width, height).coerceAtLeast(1) * 0.04f
+    forwarder.wheel(h * unit, -v * unit)
+    return true
+}
+
+/**
+ * Historical points + current — Android's analogue of UIKit coalesced touches.
+ * ChromeOS often batches trackpad samples between vsyncs into one event.
+ */
+private fun pointerSamples(event: MotionEvent, pointerIndex: Int): List<Pair<Float, Float>> {
+    val n = event.historySize
+    if (n <= 0) {
+        return listOf(event.getX(pointerIndex) to event.getY(pointerIndex))
+    }
+    val out = ArrayList<Pair<Float, Float>>(n + 1)
+    for (i in 0 until n) {
+        out.add(event.getHistoricalX(pointerIndex, i) to event.getHistoricalY(pointerIndex, i))
+    }
+    out.add(event.getX(pointerIndex) to event.getY(pointerIndex))
+    return out
 }
 
 private fun moveLocalCursor(

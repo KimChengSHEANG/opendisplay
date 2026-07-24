@@ -112,6 +112,11 @@ class CursorController(private val chromebook: Boolean = false) {
         }
     }
 
+    /** Hover left the surface — let Mac echo resume after a short grace. */
+    fun endLocalDrive() {
+        localDriveUntilMs = SystemClock.uptimeMillis() + LOCAL_HANDOFF_MS
+    }
+
     /** Host size changed (rotation / window resize) — recompute pixel size + translation. */
     fun relayout() {
         laidOutW = -1
@@ -195,6 +200,8 @@ class CursorController(private val chromebook: Boolean = false) {
 
     companion object {
         /** Keep local pointer authority long enough to cover one WiFi RTT. */
-        private const val LOCAL_DRIVE_MS = 100L
+        private const val LOCAL_DRIVE_MS = 120L
+        /** After hover exit, brief grace before Mac echo can tug position. */
+        private const val LOCAL_HANDOFF_MS = 40L
     }
 }

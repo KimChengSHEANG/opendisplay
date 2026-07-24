@@ -214,6 +214,7 @@ class MainActivity : ComponentActivity() {
             // keyframe if the TCP session survived — mirrors iOS
             // sceneDidActivate → ensureListening + setRenderingPaused(false).
             pendingResumeAccepting = false
+            decoder?.renderingPaused = false
             session?.ensureListening()
             if (session?.isConnected == true) {
                 session?.sendControl(mapOf("type" to "kf"))
@@ -234,6 +235,9 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         activityStarted = false
+        // iOS setRenderingPaused(true): stop feeding the codec while
+        // backgrounded; TCP/session stay up for a fast resume + kf.
+        decoder?.renderingPaused = true
         // Keep listening across a plain app switch (like iOS). Only lock /
         // quit tear the session down — see HostSleepController.
     }
