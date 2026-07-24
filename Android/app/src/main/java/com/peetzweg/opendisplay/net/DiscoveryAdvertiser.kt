@@ -18,6 +18,7 @@ class DiscoveryAdvertiser(
     private val context: Context,
     private var serviceName: String,
     private val installId: String,
+    private val deviceKind: String = "Android",
 ) {
     private val nsdManager: NsdManager by lazy {
         context.getSystemService(Context.NSD_SERVICE) as NsdManager
@@ -55,6 +56,7 @@ class DiscoveryAdvertiser(
                 setPort(port)
                 setAttribute("id", installId)
                 setAttribute("pv", WireProtocol.version.toString())
+                setAttribute("device", deviceKind)
             }
         nsdManager.registerService(info, NsdManager.PROTOCOL_DNS_SD, registrationListener)
     }

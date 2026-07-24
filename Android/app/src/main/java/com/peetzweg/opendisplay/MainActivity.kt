@@ -183,7 +183,12 @@ class MainActivity : ComponentActivity() {
             s.start()
             session = s
 
-            val a = DiscoveryAdvertiser(this, DiscoveryAdvertiser.deviceName(this), installId)
+            val a = DiscoveryAdvertiser(
+                this,
+                DiscoveryAdvertiser.deviceName(this),
+                installId,
+                deviceKind = ReceiverSession.deviceKind(this),
+            )
             a.start(port = ReceiverSession.DEFAULT_PORT)
             advertiser = a
         } else {
@@ -201,6 +206,7 @@ class MainActivity : ComponentActivity() {
                     this,
                     DiscoveryAdvertiser.deviceName(this),
                     InstallId.get(this),
+                    deviceKind = ReceiverSession.deviceKind(this),
                 )
                 a.start(port = ReceiverSession.DEFAULT_PORT)
                 advertiser = a

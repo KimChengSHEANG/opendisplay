@@ -203,7 +203,7 @@ final class SenderController: ObservableObject {
     // wins whenever it's available (lower, steadier latency than WiFi):
     //
     //  - USB devices connect on attach ("plug in and go") unless the user
-    //    explicitly disconnected them once (usbDisabled).
+    //    explicitly disconnected them once (usbDisabled / adbDisabled).
     //  - Plugging the cable in while the device streams over WiFi migrates
     //    the live session onto USB; unplugging it fails over to WiFi when
     //    the device's service is visible — otherwise the session ends after
@@ -211,8 +211,11 @@ final class SenderController: ObservableObject {
     //    the virtual display survives, so no screen flash, no window
     //    reshuffle — the earlier no-switching policy existed because
     //    migration used to mean destroying and recreating the session.
-    //  - WiFi devices the user connected before (wifiRemembered) reconnect
-    //    in a short window at LAUNCH only — never mid-session.
+    //  - WiFi devices auto-connect when their Bonjour service appears
+    //    (receiver app open = intent to use, same as plugging USB) unless
+    //    the user explicitly disconnected them (wifiDisabled). A short
+    //    post-launch arm delay still prefers the cable for dual-transport
+    //    devices before WiFi is dialed.
     // `-autostart NO` disables all auto-connecting, including migrations.
     private var usbDisabled = Set(UserDefaults.standard.stringArray(forKey: "usbDisabled") ?? []) {
         didSet { UserDefaults.standard.set(Array(usbDisabled), forKey: "usbDisabled") }
@@ -222,6 +225,13 @@ final class SenderController: ObservableObject {
     private var adbDisabled = Set(UserDefaults.standard.stringArray(forKey: "adbDisabled") ?? []) {
         didSet { UserDefaults.standard.set(Array(adbDisabled), forKey: "adbDisabled") }
     }
+    // WiFi counterparts: session IDs the user explicitly disconnected.
+    private var wifiDisabled = Set(UserDefaults.standard.stringArray(forKey: "wifiDisabled") ?? []) {
+        didSet { UserDefaults.standard.set(Array(wifiDisabled), forKey: "wifiDisabled") }
+    }
+    // Legacy: previously gated WiFi auto-connect to "connected once + Mac
+    // launch window". Still updated on connect for older builds / debugging,
+    // but no longer required for auto-connect (see wifiDisabled).
     private var wifiRemembered = Set(UserDefaults.standard.stringArray(forKey: "wifiRemembered") ?? []) {
         didSet { UserDefaults.standard.set(Array(wifiRemembered), forKey: "wifiRemembered") }
     }
@@ -246,13 +256,9 @@ final class SenderController: ObservableObject {
     private let autoConnectEnabled = UserDefaults.standard.object(forKey: "autostart") == nil
         || UserDefaults.standard.bool(forKey: "autostart")
 
-    // Bonjour usually reports devices before usbmuxd does — WiFi reconnects
-    // wait out this window so a cabled device is dialed over USB first. The
-    // deadline closes the window for good: a remembered WiFi device that
-    // appears later was brought near the Mac mid-session, which is a user
-    // action to confirm, not auto-grab.
+    // Bonjour usually reports devices before usbmuxd does — WiFi auto-connect
+    // waits out this arm delay so a cabled device is dialed over USB first.
     private var wifiAutoConnectArmed = false
-    private let wifiAutoConnectDeadline = Date().addingTimeInterval(12)
 
     // The Mac is asleep or locked: sessions are parked (announced + ended)
     // rather than left to time out, and reconnecting is deferred until the
@@ -324,9 +330,17 @@ final class SenderController: ObservableObject {
         return nil
     }
 
-    /// Android/Chromebook kind for a WiFi peer, when known from a past hello.
+    private func txtDeviceKind(of result: NWBrowser.Result) -> String? {
+        if case .bonjour(let txt) = result.metadata { return txt["device"] }
+        return nil
+    }
+
+    /// Android/Chromebook kind for a WiFi peer, when known from TXT, a past
+    /// hello, or the live session.
     private func androidKindHint(forWiFi result: NWBrowser.Result) -> String? {
         if let session = activeSession(coveringWiFi: result), let kind = session.deviceKind,
+           kind == "Android" || kind == "Chromebook" { return kind }
+        if let kind = txtDeviceKind(of: result),
            kind == "Android" || kind == "Chromebook" { return kind }
         if let name = serviceName(of: result), let kind = knownReceiverKinds["wifi:\(name)"],
            kind == "Android" || kind == "Chromebook" { return kind }
@@ -418,10 +432,14 @@ final class SenderController: ObservableObject {
                 connect(to: target)
             }
         }
-        guard wifiAutoConnectArmed, Date() < wifiAutoConnectDeadline else { return }
+        guard wifiAutoConnectArmed else { return }
+        // OpenDisplay only advertises while the receiver app is open — a
+        // Bonjour appearance is the WiFi analogue of plugging in USB. Dial
+        // every visible service the user hasn't opted out of; the arm delay
+        // above still lets dual-transport devices take the cable first.
         for result in discovered {
             let target = ConnectionTarget.wifi(result)
-            if wifiRemembered.contains(target.sessionID),
+            if !wifiDisabled.contains(target.sessionID),
                activeSession(coveringWiFi: result) == nil,
                !cabled(result) {
                 connect(to: target)
@@ -681,7 +699,9 @@ final class SenderController: ObservableObject {
         // Connecting a device clears its "don't auto-connect" state.
         switch target {
         case .usb: usbDisabled.remove(id)
-        case .wifi: wifiRemembered.insert(id)
+        case .wifi:
+            wifiDisabled.remove(id)
+            wifiRemembered.insert(id)
         case .androidUsb: adbDisabled.remove(id)
         }
 
@@ -804,7 +824,9 @@ final class SenderController: ObservableObject {
     func disconnect(_ session: DeviceSession) {
         switch session.target {
         case .usb: usbDisabled.insert(session.id)
-        case .wifi: wifiRemembered.remove(session.id)
+        case .wifi:
+            wifiDisabled.insert(session.id)
+            wifiRemembered.remove(session.id)
         case .androidUsb(let serial):
             adbDisabled.insert(session.id)
             try? Adb.clearForward(serial: serial)
@@ -812,7 +834,10 @@ final class SenderController: ObservableObject {
         // A migrated session is also reachable the other way — opt that side
         // out too, or auto-connect resurrects the device moments later.
         if session.onUSB, let udid = session.usbUDID { usbDisabled.insert("usb:\(udid)") }
-        if let name = session.wifiServiceName { wifiRemembered.remove("wifi:\(name)") }
+        if let name = session.wifiServiceName {
+            wifiDisabled.insert("wifi:\(name)")
+            wifiRemembered.remove("wifi:\(name)")
+        }
         end(session)
     }
 
