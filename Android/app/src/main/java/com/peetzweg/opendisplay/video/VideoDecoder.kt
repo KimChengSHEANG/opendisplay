@@ -182,7 +182,11 @@ class VideoDecoder(
             val ptsUs = System.nanoTime() / 1000
             c.queueInputBuffer(index, 0, accessUnit.size, ptsUs, flags)
             timings.noteQueued(ptsUs, System.nanoTime())
-            drainOutput(c)
+            // Nothing queued behind this frame: wait briefly so it reaches the
+            // panel now rather than on the next frame off the network. Without
+            // this the last frame of every burst sits in the codec until motion
+            // resumes — iOS's DisplayImmediately has no such hole.
+            drainOutput(c, if (queue.isEmpty()) TAIL_TIMEOUT_US else 0)
         } catch (e: IllegalStateException) {
             Log.w(TAG, "decodeOne: ${e.message}")
             // VDA often dies after a SurfaceView abandon — rebuild on next IDR.
@@ -208,11 +212,19 @@ class VideoDecoder(
         }
     }
 
-    /** Present only the newest decoded buffer (DisplayImmediately analogue). */
-    private fun drainOutput(c: MediaCodec) {
+    /**
+     * Present only the newest decoded buffer (DisplayImmediately analogue).
+     *
+     * [firstTimeoutUs] applies to the first dequeue only: callers use it to
+     * wait for a frame that is still decoding. Subsequent dequeues stay at 0
+     * so the loop drains what is ready and returns.
+     */
+    private fun drainOutput(c: MediaCodec, firstTimeoutUs: Long = 0) {
         var latest = -1
+        var timeoutUs = firstTimeoutUs
         while (true) {
-            val index = c.dequeueOutputBuffer(bufferInfo, 0)
+            val index = c.dequeueOutputBuffer(bufferInfo, timeoutUs)
+            timeoutUs = 0
             if (index == MediaCodec.INFO_TRY_AGAIN_LATER) break
             if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 Log.i(TAG, "output format: ${c.outputFormat}")
@@ -314,6 +326,9 @@ class VideoDecoder(
         private const val DROP_KF_THRESHOLD = 6
         private const val INPUT_TIMEOUT_US = 8_000L
         private const val SYNC_TIMEOUT_US = 100_000L
+        /** Half a 60fps frame — long enough for the tail frame, short enough
+         *  that a stalled decoder does not hold the decode thread. */
+        private const val TAIL_TIMEOUT_US = 8_000L
         private const val NAL_SPS = 7
         private const val NAL_PPS = 8
         private const val NAL_IDR = 5
