@@ -291,6 +291,14 @@ final class SenderController: ObservableObject {
             guard let self else { return }
             let detached = Set(self.androidDevices.map(\.serial)).subtracting(devices.map(\.serial))
             self.androidDevices = devices
+            // Seed Chromebook kind off the render path (watcher callback), not
+            // from deviceEntries — mutating @Published during a SwiftUI body
+            // read freezes the UI in an update loop.
+            for device in devices where device.isChromebook {
+                if self.knownReceiverKinds["adb:\(device.serial)"] != "Chromebook" {
+                    self.knownReceiverKinds["adb:\(device.serial)"] = "Chromebook"
+                }
+            }
             self.androidDetached(detached)
             self.autoConnect()
         }
@@ -1096,10 +1104,9 @@ final class SenderController: ObservableObject {
                 wifiTarget: twin.map { .wifi($0) },
                 kindHint: kind == "Chromebook" ? kind : (device.isChromebook ? "Chromebook" : "Android"))
             )
-            // Seed kind so WiFi rows / future plugs recognize this Chromebook.
-            if device.isChromebook {
-                knownReceiverKinds["adb:\(device.serial)"] = "Chromebook"
-            }
+            // Do NOT mutate knownReceiverKinds here — deviceEntries is read
+            // during SwiftUI body evaluation; writing @Published would
+            // re-enter forever and freeze the UI.
         }
         for result in discovered {
             guard let name = serviceName(of: result), !mergedServices.contains(name)
