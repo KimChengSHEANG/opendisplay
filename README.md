@@ -119,7 +119,7 @@ app onto your device).
 To stream to an **Android** receiver over USB, install Android platform-tools
 so the Mac can find `adb` (`brew install --cask android-platform-tools`, or
 the SDK's `platform-tools/`). Enable **USB debugging** on the phone and tap
-**Allow** when prompted; the Mac tunnels the connection with `adb reverse`.
+**Allow** when prompted; the Mac tunnels the connection with `adb forward`.
 
 ### Build
 
@@ -165,7 +165,7 @@ Or open the `Android/` folder in Android Studio and hit Run.
 
 For **Android** receivers, plug in a phone with USB debugging enabled — the
 Mac needs `adb` on its PATH (see Prerequisites) and auto-connects over the
-cable via `adb reverse`. No WiFi needed.
+cable via `adb forward`. No WiFi needed.
 
 ### Run (WiFi)
 

@@ -1,9 +1,12 @@
-// Adb — reverse-USB transport for Android receivers. Android has no
+// Adb — forward-USB transport for Android receivers. Android has no
 // usbmuxd equivalent, so wired streaming rides on the Android Debug Bridge:
-// `adb reverse tcp:9000 tcp:9000` opens a tunnel from the phone's localhost
-// back to the Mac's, and the existing TCP sender then dials 127.0.0.1:9000
-// as if the receiver were local. One external dependency — the `adb` binary
-// that ships with Android platform-tools — located best-effort below.
+// the Android app listens on :9000, so `adb forward tcp:9000 tcp:9000`
+// forwards connections to the Mac's localhost:9000 through to the phone's
+// localhost:9000, and the existing TCP sender then dials 127.0.0.1:9000 as
+// if the receiver were local. (`adb reverse` is the opposite direction —
+// device connects back to host — and would be wrong here.) One external
+// dependency — the `adb` binary that ships with Android platform-tools —
+// located best-effort below.
 
 import Foundation
 
@@ -82,14 +85,15 @@ enum Adb {
         return result
     }
 
-    /// Tunnel the phone's localhost:port back to this Mac's localhost:port.
-    static func reverse(serial: String, port: UInt16) throws {
-        _ = try run(["-s", serial, "reverse", "tcp:\(port)", "tcp:\(port)"])
+    /// Forward this Mac's localhost:port to the phone's localhost:port,
+    /// where the Android receiver is listening.
+    static func forward(serial: String, port: UInt16) throws {
+        _ = try run(["-s", serial, "forward", "tcp:\(port)", "tcp:\(port)"])
     }
 
-    /// Tear down every reverse tunnel for the device (best-effort on cleanup).
-    static func clearReverse(serial: String) throws {
-        _ = try run(["-s", serial, "reverse", "--remove-all"])
+    /// Tear down every forward tunnel for the device (best-effort on cleanup).
+    static func clearForward(serial: String) throws {
+        _ = try run(["-s", serial, "forward", "--remove-all"])
     }
 
     // MARK: - Process plumbing

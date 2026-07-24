@@ -95,7 +95,7 @@ enum MainWindow {
 enum ConnectionTarget: Hashable {
     case usb(udid: String?)           // wired via built-in usbmuxd; nil = first device
     case wifi(NWBrowser.Result)       // discovered via Bonjour
-    case androidUsb(serial: String)   // wired via `adb reverse` → local TCP
+    case androidUsb(serial: String)   // wired via `adb forward` → local TCP
 
     /// Stable identity for sessions and persistence — survives Bonjour
     /// re-discovery (fresh NWBrowser.Result) and USB replugs (new DeviceID).
@@ -155,7 +155,7 @@ final class DeviceSession: ObservableObject, Identifiable {
             onUSB = true
             usbUDID = udid
         } else if case .androidUsb = target {
-            // Reverse-tunnelled over the cable — a USB transport, but tracked
+            // Forward-tunnelled over the cable — a USB transport, but tracked
             // separately (no usbmux DeviceID, so failover/migration skips it).
             onUSB = true
         } else {
@@ -217,7 +217,7 @@ final class SenderController: ObservableObject {
     private var usbDisabled = Set(UserDefaults.standard.stringArray(forKey: "usbDisabled") ?? []) {
         didSet { UserDefaults.standard.set(Array(usbDisabled), forKey: "usbDisabled") }
     }
-    // Android reverse-USB counterpart of usbDisabled: serials the user
+    // Android forward-USB counterpart of usbDisabled: serials the user
     // explicitly disconnected, so they don't auto-reconnect on the next poll.
     private var adbDisabled = Set(UserDefaults.standard.stringArray(forKey: "adbDisabled") ?? []) {
         didSet { UserDefaults.standard.set(Array(adbDisabled), forKey: "adbDisabled") }
@@ -636,13 +636,14 @@ final class SenderController: ObservableObject {
             transport = .tcp(result.endpoint)
         case .androidUsb(let serial):
             guard let portNum = UInt16(port) else { return }
-            // Open the reverse tunnel before dialing: the phone's
-            // localhost:port now routes back to this Mac, so the plain TCP
-            // sender reaches the receiver at 127.0.0.1 as if it were local.
+            // Open the forward tunnel before dialing: this Mac's
+            // localhost:port now routes to the phone's, where the receiver
+            // listens, so the plain TCP sender reaches it at 127.0.0.1 as if
+            // it were local.
             do {
-                try Adb.reverse(serial: serial, port: portNum)
+                try Adb.forward(serial: serial, port: portNum)
             } catch {
-                Log.info("adb reverse failed for \(serial): \(error)")
+                Log.info("adb forward failed for \(serial): \(error)")
                 return
             }
             transport = .tcp(.hostPort(host: "127.0.0.1",
@@ -725,7 +726,7 @@ final class SenderController: ObservableObject {
         case .wifi: wifiRemembered.remove(session.id)
         case .androidUsb(let serial):
             adbDisabled.insert(session.id)
-            try? Adb.clearReverse(serial: serial)
+            try? Adb.clearForward(serial: serial)
         }
         // A migrated session is also reachable the other way — opt that side
         // out too, or auto-connect resurrects the device moments later.
