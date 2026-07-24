@@ -57,6 +57,13 @@ class MainActivity : ComponentActivity() {
     private val versionGate = VersionGate()
     private var session: ReceiverSession? = null
     private var decoder: VideoDecoder? = null
+    /** Latest SPS+PPS+IDR seen while the decode surface wasn't ready yet. */
+    @Volatile private var pendingSyncFrame: ByteArray? = null
+    private val kfRetryRunnable = Runnable {
+        val d = decoder ?: return@Runnable
+        if (session?.isConnected != true) return@Runnable
+        if (!d.hasRendered) session?.sendControl(mapOf("type" to "kf"))
+    }
     private var advertiser: DiscoveryAdvertiser? = null
     private var savedBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
     private var lockReceiverRegistered = false
@@ -137,16 +144,21 @@ class MainActivity : ComponentActivity() {
                 },
                 onSurfaceReady = { d ->
                     // Streaming UI mounts only after `connected`, so the Mac's
-                    // opening IDR (and its SPS/PPS) is often already on the
-                    // wire before this surface exists — without a fresh
-                    // keyframe MediaCodec never starts and the panel stays
-                    // blank/green. Ask immediately once the texture is live.
+                    // opening IDR is often already on the wire — stash + replay
+                    // it, then ask for another keyframe in case the stash was
+                    // only P-frames or the ARC decoder needed a second sync.
                     decoder = d
+                    val pending = pendingSyncFrame
+                    pendingSyncFrame = null
+                    if (pending != null) d.feedAnnexB(pending)
                     if (session?.isConnected == true) {
                         session?.sendControl(mapOf("type" to "kf"))
+                        fpsHandler.removeCallbacks(kfRetryRunnable)
+                        fpsHandler.postDelayed(kfRetryRunnable, 400)
                     }
                 },
                 onSurfaceDestroyed = {
+                    fpsHandler.removeCallbacks(kfRetryRunnable)
                     decoder?.release()
                     decoder = null
                 },
@@ -303,6 +315,8 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 connected = false
                 cursor = CursorState()
+                pendingSyncFrame = null
+                fpsHandler.removeCallbacks(kfRetryRunnable)
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 applyImmersive()
                 fpsHandler.removeCallbacks(fpsTicker)
@@ -312,7 +326,14 @@ class MainActivity : ComponentActivity() {
 
         override fun onVideoFrame(data: ByteArray) {
             frameCount++
-            decoder?.feedAnnexB(data)
+            val d = decoder
+            if (d == null) {
+                // Hold the sync frame until TextureView is up — first-connect
+                // green screen on Chromebook is almost always a missed IDR.
+                if (VideoDecoder.containsIdr(data)) pendingSyncFrame = data.copyOf()
+                return
+            }
+            d.feedAnnexB(data)
         }
 
         override fun onControl(map: Map<String, Any>) {

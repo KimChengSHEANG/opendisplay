@@ -23,6 +23,11 @@ class VideoDecoder(private val surface: Surface) {
     private var pps: ByteArray? = null
     private val bufferInfo = MediaCodec.BufferInfo()
 
+    /** True after at least one decoded buffer has been released to the surface. */
+    @Volatile
+    var hasRendered: Boolean = false
+        private set
+
     /** Feed one Annex B access unit (one or more start-code-delimited NAL units). */
     @Synchronized
     fun feedAnnexB(frame: ByteArray) {
@@ -38,16 +43,24 @@ class VideoDecoder(private val surface: Surface) {
             if (s != null && p != null) startCodec(s, p) else return
         }
         val accessUnit = annexBWithoutParameterSets(frame) ?: return
+        val isSync = containsIdr(frame)
         val c = codec ?: return
         try {
-            val index = c.dequeueInputBuffer(TIMEOUT_US)
+            // IDR must not be silently dropped — Chromebook ARC often isn't
+            // ready for input on the first try after configure, and without
+            // that sync frame the surface stays solid green until the next
+            // Mac keyframe (up to 60s).
+            var index = c.dequeueInputBuffer(TIMEOUT_US)
+            if (index < 0 && isSync) {
+                index = c.dequeueInputBuffer(SYNC_TIMEOUT_US)
+            }
             if (index >= 0) {
                 val input = c.getInputBuffer(index) ?: return
                 if (accessUnit.size > input.capacity()) return
                 input.clear()
                 input.put(accessUnit)
-                // PTS 0 + render=true → present immediately (low-latency path).
-                c.queueInputBuffer(index, 0, accessUnit.size, 0L, 0)
+                val flags = if (isSync) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+                c.queueInputBuffer(index, 0, accessUnit.size, 0L, flags)
             }
             drainOutput(c)
         } catch (_: IllegalStateException) {
@@ -61,6 +74,7 @@ class VideoDecoder(private val surface: Surface) {
         releaseCodec()
         sps = null
         pps = null
+        hasRendered = false
     }
 
     /** Stop and release the codec, but keep the (possibly updated) SPS/PPS so
@@ -68,6 +82,7 @@ class VideoDecoder(private val surface: Surface) {
     private fun releaseCodec() {
         val c = codec
         codec = null
+        hasRendered = false
         if (c == null) return
         try {
             c.stop()
@@ -83,8 +98,8 @@ class VideoDecoder(private val surface: Surface) {
         while (true) {
             val index = c.dequeueOutputBuffer(bufferInfo, 0)
             if (index < 0) return
-            // Always render; INFO_OUTPUT_FORMAT_CHANGED returns -2 and is skipped above.
             c.releaseOutputBuffer(index, true)
+            hasRendered = true
         }
     }
 
@@ -105,6 +120,8 @@ class VideoDecoder(private val surface: Surface) {
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, DEFAULT_WIDTH, DEFAULT_HEIGHT)
         format.setByteBuffer("csd-0", ByteBuffer.wrap(START_CODE + sps))
         format.setByteBuffer("csd-1", ByteBuffer.wrap(START_CODE + pps))
+        // Large enough for a 4K IDR; Chromebook VDA rejects oversized queues.
+        format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 2 * 1024 * 1024)
         try {
             val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
             c.configure(format, surface, null, 0)
@@ -119,14 +136,20 @@ class VideoDecoder(private val surface: Surface) {
 
     companion object {
         private const val TIMEOUT_US = 10_000L
+        private const val SYNC_TIMEOUT_US = 100_000L
         private const val NAL_SPS = 7
         private const val NAL_PPS = 8
+        private const val NAL_IDR = 5
 
         // Real dimensions are irrelevant here: rendering straight to a Surface,
         // MediaCodec resizes its output to whatever the in-band SPS declares.
         private const val DEFAULT_WIDTH = 1280
         private const val DEFAULT_HEIGHT = 720
         private val START_CODE = byteArrayOf(0, 0, 0, 1)
+
+        /** True if [frame] contains an IDR slice (NAL type 5) — a sync point. */
+        fun containsIdr(frame: ByteArray): Boolean =
+            splitAnnexB(frame).any { it.isNotEmpty() && (it[0].toInt() and 0x1F) == NAL_IDR }
 
         /**
          * Rebuild Annex B with SPS/PPS removed. Parameter sets are supplied via

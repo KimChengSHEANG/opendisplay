@@ -42,6 +42,15 @@ class VideoDecoderTest {
     }
 
     @Test
+    fun containsIdr_detectsIdrNal() {
+        val sps = byteArrayOf(0x67, 0x42)
+        val idr = byteArrayOf(0x65, 0x01, 0x02)
+        val data = byteArrayOf(0, 0, 0, 1) + sps + byteArrayOf(0, 0, 0, 1) + idr
+        assertEquals(true, VideoDecoder.containsIdr(data))
+        assertEquals(false, VideoDecoder.containsIdr(byteArrayOf(0, 0, 0, 1) + sps))
+    }
+
+    @Test
     fun annexBWithoutParameterSets_stripsSpsPpsKeepsIdr() {
         val sps = byteArrayOf(0x67, 0x42, 0x00)
         val pps = byteArrayOf(0x68, 0xCE.toByte())
