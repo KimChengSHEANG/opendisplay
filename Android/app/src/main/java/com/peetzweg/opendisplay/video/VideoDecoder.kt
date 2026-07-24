@@ -1,23 +1,27 @@
 package com.peetzweg.opendisplay.video
 
 import android.media.MediaCodec
+import android.media.MediaCodecList
 import android.media.MediaFormat
+import android.os.Build
+import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
 
 /**
  * Decodes an Annex B `video/avc` (H.264) elementary stream onto [surface] via
- * hardware `MediaCodec`. Mirrors `PhoneReceiver.swift`'s low-latency path:
- * every decoded frame is released to the surface immediately, no PTS
- * scheduling.
+ * `MediaCodec`. On ChromeOS ARC the hardware `c2.vda.avc.decoder` path often
+ * paints a solid green TextureView even after a successful format change —
+ * we prefer a software AVC decoder there. Elsewhere we use the default
+ * hardware decoder.
  *
- * The codec isn't started until the first SPS+PPS pair is observed in-band —
- * the Mac prepends both (start-code delimited) ahead of every keyframe, see
- * `MacSender.swift`'s `annexB(from:)`. Parameter sets go into `csd-0`/`csd-1`
- * only; VCL NALs are queued as input (same split iOS uses before
- * `CMSampleBuffer`).
+ * Codec starts on the first in-band SPS+PPS (Mac prepends both on keyframes).
+ * Parameter sets go into `csd-0`/`csd-1` only; VCL NALs are queued as input.
  */
-class VideoDecoder(private val surface: Surface) {
+class VideoDecoder(
+    private val surface: Surface,
+    private val preferSoftware: Boolean = false,
+) {
     private var codec: MediaCodec? = null
     private var sps: ByteArray? = null
     private var pps: ByteArray? = null
@@ -32,10 +36,6 @@ class VideoDecoder(private val surface: Surface) {
     @Synchronized
     fun feedAnnexB(frame: ByteArray) {
         val parametersChanged = scanForParameterSets(frame)
-        // Mid-stream SPS/PPS change (e.g. the Mac's virtual display resized or
-        // rotated) can't be applied to a running codec — tear it down and
-        // reconfigure with the new parameter sets. Mirrors iOS resetting its
-        // `formatDesc` when SPS/PPS change. See `PhoneReceiver.swift`.
         if (codec != null && parametersChanged) releaseCodec()
         if (codec == null) {
             val s = sps
@@ -46,29 +46,27 @@ class VideoDecoder(private val surface: Surface) {
         val isSync = containsIdr(frame)
         val c = codec ?: return
         try {
-            // IDR must not be silently dropped — Chromebook ARC often isn't
-            // ready for input on the first try after configure, and without
-            // that sync frame the surface stays solid green until the next
-            // Mac keyframe (up to 60s).
             var index = c.dequeueInputBuffer(TIMEOUT_US)
             if (index < 0 && isSync) {
                 index = c.dequeueInputBuffer(SYNC_TIMEOUT_US)
             }
             if (index >= 0) {
                 val input = c.getInputBuffer(index) ?: return
-                if (accessUnit.size > input.capacity()) return
+                if (accessUnit.size > input.capacity()) {
+                    Log.w(TAG, "input too large: ${accessUnit.size} > ${input.capacity()}")
+                    return
+                }
                 input.clear()
                 input.put(accessUnit)
                 val flags = if (isSync) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
-                c.queueInputBuffer(index, 0, accessUnit.size, 0L, flags)
+                c.queueInputBuffer(index, 0, accessUnit.size, System.nanoTime() / 1000, flags)
             }
             drainOutput(c)
-        } catch (_: IllegalStateException) {
-            // Codec was concurrently released, or hit an internal error state — drop this frame.
+        } catch (e: IllegalStateException) {
+            Log.w(TAG, "feedAnnexB: ${e.message}")
         }
     }
 
-    /** Releases the underlying codec and clears cached parameter sets. */
     @Synchronized
     fun release() {
         releaseCodec()
@@ -77,8 +75,6 @@ class VideoDecoder(private val surface: Surface) {
         hasRendered = false
     }
 
-    /** Stop and release the codec, but keep the (possibly updated) SPS/PPS so
-     *  [feedAnnexB] can immediately reconfigure. Safe to call more than once. */
     private fun releaseCodec() {
         val c = codec
         codec = null
@@ -97,13 +93,18 @@ class VideoDecoder(private val surface: Surface) {
     private fun drainOutput(c: MediaCodec) {
         while (true) {
             val index = c.dequeueOutputBuffer(bufferInfo, 0)
+            if (index == MediaCodec.INFO_TRY_AGAIN_LATER) return
+            if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                Log.i(TAG, "output format: ${c.outputFormat}")
+                continue
+            }
+            if (index == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) continue
             if (index < 0) return
             c.releaseOutputBuffer(index, true)
             hasRendered = true
         }
     }
 
-    /** Updates cached SPS/PPS from [frame]; returns true if either changed. */
     private fun scanForParameterSets(frame: ByteArray): Boolean {
         var changed = false
         for (nalu in splitAnnexB(frame)) {
@@ -120,42 +121,109 @@ class VideoDecoder(private val surface: Surface) {
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, DEFAULT_WIDTH, DEFAULT_HEIGHT)
         format.setByteBuffer("csd-0", ByteBuffer.wrap(START_CODE + sps))
         format.setByteBuffer("csd-1", ByteBuffer.wrap(START_CODE + pps))
-        // Large enough for a 4K IDR; Chromebook VDA rejects oversized queues.
         format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 2 * 1024 * 1024)
         try {
-            val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            val c = createCodec()
+            Log.i(TAG, "configure ${c.name} software=$preferSoftware")
             c.configure(format, surface, null, 0)
             c.start()
             codec = c
-        } catch (_: Exception) {
-            // Surface gone / unsupported stream / ARC decoder glitch — drop
-            // until the next SPS/PPS keyframe retries startCodec.
+        } catch (e: Exception) {
+            Log.e(TAG, "startCodec failed", e)
             codec = null
         }
     }
 
+    private fun createCodec(): MediaCodec {
+        if (preferSoftware) {
+            // Prefer known software names first — MediaCodecList ordering on
+            // ARC often returns c2.vda.avc.decoder as the "default" AVC path,
+            // which greens TextureView/SurfaceView composites on Cheets.
+            for (name in SOFTWARE_AVC_NAMES) {
+                try {
+                    return MediaCodec.createByCodecName(name)
+                } catch (e: Exception) {
+                    Log.w(TAG, "software codec $name failed: ${e.message}")
+                }
+            }
+            findSoftwareAvcDecoder()?.let { name ->
+                try {
+                    return MediaCodec.createByCodecName(name)
+                } catch (e: Exception) {
+                    Log.w(TAG, "software codec $name failed: ${e.message}")
+                }
+            }
+            Log.w(TAG, "no software AVC decoder; falling back to default")
+        }
+        return MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+    }
+
     companion object {
+        private const val TAG = "VideoDecoder"
         private const val TIMEOUT_US = 10_000L
         private const val SYNC_TIMEOUT_US = 100_000L
         private const val NAL_SPS = 7
         private const val NAL_PPS = 8
         private const val NAL_IDR = 5
-
-        // Real dimensions are irrelevant here: rendering straight to a Surface,
-        // MediaCodec resizes its output to whatever the in-band SPS declares.
         private const val DEFAULT_WIDTH = 1280
         private const val DEFAULT_HEIGHT = 720
         private val START_CODE = byteArrayOf(0, 0, 0, 1)
+        private val SOFTWARE_AVC_NAMES = listOf(
+            "c2.android.avc.decoder",
+            "OMX.google.h264.decoder",
+        )
 
-        /** True if [frame] contains an IDR slice (NAL type 5) — a sync point. */
         fun containsIdr(frame: ByteArray): Boolean =
             splitAnnexB(frame).any { it.isNotEmpty() && (it[0].toInt() and 0x1F) == NAL_IDR }
 
         /**
-         * Rebuild Annex B with SPS/PPS removed. Parameter sets are supplied via
-         * MediaFormat CSD; feeding them again as slice data makes some Android
-         * / ARC decoders paint a solid green surface.
+         * ChromeOS ARC's VDA hardware path frequently composites green onto
+         * TextureView; software AVC is the reliable fallback there.
          */
+        fun preferSoftwareDecoder(): Boolean {
+            val tags = listOf(
+                Build.DEVICE?.lowercase().orEmpty(),
+                Build.MODEL?.lowercase().orEmpty(),
+                Build.PRODUCT?.lowercase().orEmpty(),
+                Build.BRAND?.lowercase().orEmpty(),
+                Build.MANUFACTURER?.lowercase().orEmpty(),
+            )
+            if (tags.any { it.contains("chromebook") || it.contains("chromeos") || it.contains("cheets") }) {
+                return true
+            }
+            // ARC feature flags (set on ChromeOS Android containers).
+            return try {
+                val clazz = Class.forName("android.os.SystemProperties")
+                val get = clazz.getMethod("get", String::class.java, String::class.java)
+                val arc = get.invoke(null, "ro.boot.container", "") as String
+                arc.isNotEmpty()
+            } catch (_: Exception) {
+                false
+            }
+        }
+
+        private fun findSoftwareAvcDecoder(): String? {
+            val list = MediaCodecList(MediaCodecList.ALL_CODECS)
+            var soft: String? = null
+            for (info in list.codecInfos) {
+                if (info.isEncoder) continue
+                if (!info.supportedTypes.any { it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true) }) continue
+                val name = info.name
+                val isSoftware = if (Build.VERSION.SDK_INT >= 29) {
+                    info.isSoftwareOnly
+                } else {
+                    name.contains("android", ignoreCase = true)
+                        || name.contains("google", ignoreCase = true)
+                        || name.startsWith("c2.android.", ignoreCase = true)
+                }
+                if (!isSoftware) continue
+                // Prefer modern c2 software over legacy OMX.google.
+                if (name.contains("c2.android", ignoreCase = true)) return name
+                if (soft == null) soft = name
+            }
+            return soft
+        }
+
         fun annexBWithoutParameterSets(frame: ByteArray): ByteArray? {
             val nalus = splitAnnexB(frame)
             var size = 0
@@ -182,9 +250,7 @@ class VideoDecoder(private val surface: Surface) {
             return out
         }
 
-        /** Splits Annex B data on 3- or 4-byte start codes into raw NAL units (start codes stripped). */
         fun splitAnnexB(data: ByteArray): List<ByteArray> {
-            // Each entry: (index where the start code begins, index right after it — i.e. NAL payload start).
             val starts = ArrayList<Pair<Int, Int>>()
             var i = 0
             while (i + 2 < data.size) {

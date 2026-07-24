@@ -2,11 +2,15 @@ package com.peetzweg.opendisplay.ui
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.PixelFormat
 import android.graphics.SurfaceTexture
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.Surface
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.TextureView
+import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
 import androidx.compose.foundation.background
@@ -17,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.viewinterop.AndroidView
 import com.peetzweg.opendisplay.input.InputForwarder
+import com.peetzweg.opendisplay.session.ReceiverSession
 import com.peetzweg.opendisplay.video.VideoDecoder
 import java.util.Base64
 
@@ -39,12 +44,10 @@ data class CursorState(
  * Fullscreen video surface the Mac's stream is decoded onto, with a sibling
  * [ImageView] for the local cursor sprite.
  *
- * Uses [TextureView] (not [android.view.SurfaceView]): SurfaceView punches a
- * hole in the window and shows an uninitialized green buffer until the first
- * IDR lands — and because Compose only mounts this screen after `connected`,
- * that first keyframe is often already gone. TextureView composites in the
- * view hierarchy (black until frames arrive) and plays nicely with the cursor
- * overlay and analytics Compose layers.
+ * ChromeOS ARC: [SurfaceView] + software AVC. TextureView + hardware VDA
+ * commonly paints a solid green buffer even after frames decode. Phones/tablets
+ * keep [TextureView] (composites cleanly with overlays; black until the first
+ * frame instead of SurfaceView's uninitialized green).
  */
 @Composable
 fun StreamingScreen(
@@ -58,21 +61,83 @@ fun StreamingScreen(
     AndroidView(
         modifier = modifier.fillMaxSize().background(Color.Black),
         factory = { context ->
+            val chromebook = ReceiverSession.deviceKind(context) == "Chromebook"
             val root = FrameLayout(context).apply {
                 setBackgroundColor(android.graphics.Color.BLACK)
-            }
-            val texture = TextureView(context).apply {
-                isOpaque = true
             }
             val cursorView = ImageView(context).apply {
                 scaleType = ImageView.ScaleType.FIT_XY
                 visibility = android.view.View.GONE
-                // Don't steal touches from the video under us.
                 isClickable = false
                 isFocusable = false
             }
+            val video: View = if (chromebook) {
+                SurfaceView(context).also { surfaceView ->
+                    // Default z-order (hole-punch): sibling ImageView draws above
+                    // the surface. Media-overlay / on-top would hide the cursor.
+                    surfaceView.holder.setFormat(PixelFormat.OPAQUE)
+                    surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
+                        override fun surfaceCreated(holder: SurfaceHolder) {
+                            onSurfaceReady(
+                                VideoDecoder(
+                                    holder.surface,
+                                    preferSoftware = true,
+                                ),
+                            )
+                        }
+
+                        override fun surfaceChanged(
+                            holder: SurfaceHolder,
+                            format: Int,
+                            width: Int,
+                            height: Int,
+                        ) {}
+
+                        override fun surfaceDestroyed(holder: SurfaceHolder) {
+                            onSurfaceDestroyed()
+                        }
+                    })
+                }
+            } else {
+                TextureView(context).also { texture ->
+                    texture.isOpaque = true
+                    var codecSurface: Surface? = null
+                    texture.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                        override fun onSurfaceTextureAvailable(
+                            st: SurfaceTexture,
+                            width: Int,
+                            height: Int,
+                        ) {
+                            val w = width.coerceAtLeast(1280)
+                            val h = height.coerceAtLeast(720)
+                            st.setDefaultBufferSize(w, h)
+                            codecSurface?.release()
+                            val surface = Surface(st)
+                            codecSurface = surface
+                            onSurfaceReady(VideoDecoder(surface, preferSoftware = false))
+                        }
+
+                        override fun onSurfaceTextureSizeChanged(
+                            st: SurfaceTexture,
+                            width: Int,
+                            height: Int,
+                        ) {
+                            if (width > 0 && height > 0) st.setDefaultBufferSize(width, height)
+                        }
+
+                        override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+                            onSurfaceDestroyed()
+                            codecSurface?.release()
+                            codecSurface = null
+                            return true
+                        }
+
+                        override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+                    }
+                }
+            }
             root.addView(
-                texture,
+                video,
                 FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
                     FrameLayout.LayoutParams.MATCH_PARENT,
@@ -83,30 +148,7 @@ fun StreamingScreen(
                 FrameLayout.LayoutParams(0, 0).apply { gravity = Gravity.TOP or Gravity.START },
             )
             root.tag = cursorView
-
-            // Surface we wrap around the TextureView's SurfaceTexture — must be
-            // released when the texture goes away.
-            var codecSurface: Surface? = null
-            texture.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
-                    codecSurface?.release()
-                    val surface = Surface(st)
-                    codecSurface = surface
-                    onSurfaceReady(VideoDecoder(surface))
-                }
-
-                override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) {}
-
-                override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
-                    onSurfaceDestroyed()
-                    codecSurface?.release()
-                    codecSurface = null
-                    return true
-                }
-
-                override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
-            }
-            texture.setOnTouchListener { view, event ->
+            video.setOnTouchListener { view, event ->
                 handleTouch(forwarder, view.width, view.height, event)
             }
             root
