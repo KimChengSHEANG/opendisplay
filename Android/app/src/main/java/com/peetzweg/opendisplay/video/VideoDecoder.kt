@@ -13,7 +13,9 @@ import java.nio.ByteBuffer
  *
  * The codec isn't started until the first SPS+PPS pair is observed in-band —
  * the Mac prepends both (start-code delimited) ahead of every keyframe, see
- * `MacSender.swift`'s `annexB(from:)`.
+ * `MacSender.swift`'s `annexB(from:)`. Parameter sets go into `csd-0`/`csd-1`
+ * only; VCL NALs are queued as input (same split iOS uses before
+ * `CMSampleBuffer`).
  */
 class VideoDecoder(private val surface: Surface) {
     private var codec: MediaCodec? = null
@@ -35,14 +37,17 @@ class VideoDecoder(private val surface: Surface) {
             val p = pps
             if (s != null && p != null) startCodec(s, p) else return
         }
+        val accessUnit = annexBWithoutParameterSets(frame) ?: return
         val c = codec ?: return
         try {
             val index = c.dequeueInputBuffer(TIMEOUT_US)
             if (index >= 0) {
-                val input = c.getInputBuffer(index)
-                input?.clear()
-                input?.put(frame)
-                c.queueInputBuffer(index, 0, frame.size, System.nanoTime() / 1000, 0)
+                val input = c.getInputBuffer(index) ?: return
+                if (accessUnit.size > input.capacity()) return
+                input.clear()
+                input.put(accessUnit)
+                // PTS 0 + render=true → present immediately (low-latency path).
+                c.queueInputBuffer(index, 0, accessUnit.size, 0L, 0)
             }
             drainOutput(c)
         } catch (_: IllegalStateException) {
@@ -78,6 +83,7 @@ class VideoDecoder(private val surface: Surface) {
         while (true) {
             val index = c.dequeueOutputBuffer(bufferInfo, 0)
             if (index < 0) return
+            // Always render; INFO_OUTPUT_FORMAT_CHANGED returns -2 and is skipped above.
             c.releaseOutputBuffer(index, true)
         }
     }
@@ -115,6 +121,37 @@ class VideoDecoder(private val surface: Surface) {
         private const val DEFAULT_WIDTH = 1280
         private const val DEFAULT_HEIGHT = 720
         private val START_CODE = byteArrayOf(0, 0, 0, 1)
+
+        /**
+         * Rebuild Annex B with SPS/PPS removed. Parameter sets are supplied via
+         * MediaFormat CSD; feeding them again as slice data makes some Android
+         * / ARC decoders paint a solid green surface.
+         */
+        fun annexBWithoutParameterSets(frame: ByteArray): ByteArray? {
+            val nalus = splitAnnexB(frame)
+            var size = 0
+            val kept = ArrayList<ByteArray>(nalus.size)
+            for (nalu in nalus) {
+                if (nalu.isEmpty()) continue
+                when (nalu[0].toInt() and 0x1F) {
+                    NAL_SPS, NAL_PPS -> continue
+                    else -> {
+                        kept.add(nalu)
+                        size += START_CODE.size + nalu.size
+                    }
+                }
+            }
+            if (kept.isEmpty()) return null
+            val out = ByteArray(size)
+            var o = 0
+            for (nalu in kept) {
+                System.arraycopy(START_CODE, 0, out, o, START_CODE.size)
+                o += START_CODE.size
+                System.arraycopy(nalu, 0, out, o, nalu.size)
+                o += nalu.size
+            }
+            return out
+        }
 
         /** Splits Annex B data on 3- or 4-byte start codes into raw NAL units (start codes stripped). */
         fun splitAnnexB(data: ByteArray): List<ByteArray> {

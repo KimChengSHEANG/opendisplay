@@ -2,10 +2,11 @@ package com.peetzweg.opendisplay.ui
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.SurfaceTexture
 import android.view.Gravity
 import android.view.MotionEvent
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.view.Surface
+import android.view.TextureView
 import android.widget.FrameLayout
 import android.widget.ImageView
 import androidx.compose.foundation.background
@@ -35,10 +36,15 @@ data class CursorState(
 )
 
 /**
- * Fullscreen black surface the Mac's decoded video is rendered onto, with a
- * sibling [ImageView] for the local cursor sprite (SurfaceView punches a hole
- * in the window, so Compose overlays above it won't show — the cursor must
- * live in the same FrameLayout as the surface, matching iOS's CALayer).
+ * Fullscreen video surface the Mac's stream is decoded onto, with a sibling
+ * [ImageView] for the local cursor sprite.
+ *
+ * Uses [TextureView] (not [android.view.SurfaceView]): SurfaceView punches a
+ * hole in the window and shows an uninitialized green buffer until the first
+ * IDR lands — and because Compose only mounts this screen after `connected`,
+ * that first keyframe is often already gone. TextureView composites in the
+ * view hierarchy (black until frames arrive) and plays nicely with the cursor
+ * overlay and analytics Compose layers.
  */
 @Composable
 fun StreamingScreen(
@@ -52,17 +58,21 @@ fun StreamingScreen(
     AndroidView(
         modifier = modifier.fillMaxSize().background(Color.Black),
         factory = { context ->
-            val root = FrameLayout(context)
-            val surface = SurfaceView(context)
+            val root = FrameLayout(context).apply {
+                setBackgroundColor(android.graphics.Color.BLACK)
+            }
+            val texture = TextureView(context).apply {
+                isOpaque = true
+            }
             val cursorView = ImageView(context).apply {
                 scaleType = ImageView.ScaleType.FIT_XY
                 visibility = android.view.View.GONE
-                // Don't steal touches from the surface under us.
+                // Don't steal touches from the video under us.
                 isClickable = false
                 isFocusable = false
             }
             root.addView(
-                surface,
+                texture,
                 FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
                     FrameLayout.LayoutParams.MATCH_PARENT,
@@ -74,18 +84,29 @@ fun StreamingScreen(
             )
             root.tag = cursorView
 
-            surface.holder.addCallback(object : SurfaceHolder.Callback {
-                override fun surfaceCreated(holder: SurfaceHolder) {
-                    onSurfaceReady(VideoDecoder(holder.surface))
+            // Surface we wrap around the TextureView's SurfaceTexture — must be
+            // released when the texture goes away.
+            var codecSurface: Surface? = null
+            texture.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
+                    codecSurface?.release()
+                    val surface = Surface(st)
+                    codecSurface = surface
+                    onSurfaceReady(VideoDecoder(surface))
                 }
 
-                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+                override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) {}
 
-                override fun surfaceDestroyed(holder: SurfaceHolder) {
+                override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
                     onSurfaceDestroyed()
+                    codecSurface?.release()
+                    codecSurface = null
+                    return true
                 }
-            })
-            surface.setOnTouchListener { view, event ->
+
+                override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+            }
+            texture.setOnTouchListener { view, event ->
                 handleTouch(forwarder, view.width, view.height, event)
             }
             root

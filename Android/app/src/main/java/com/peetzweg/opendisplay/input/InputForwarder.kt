@@ -7,7 +7,7 @@ package com.peetzweg.opendisplay.input
  * `{"type":"touch","phase":"began|moved|ended|cancelled","x":0…1,"y":0…1}`
  * `{"type":"scroll","dx":…,"dy":…}` (deltas in video pixels).
  *
- * `StreamingScreen`'s `SurfaceView` fills its container with no letterboxing
+ * `StreamingScreen`'s video view fills its container with no letterboxing
  * — the `hello` handshake already advertises the device's own pixel size, so
  * the Mac captures 1:1 — so normalization is a plain view-pixel ratio here,
  * simpler than iOS's aspect-fit math against a negotiated video size.

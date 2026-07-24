@@ -135,7 +135,17 @@ class MainActivity : ComponentActivity() {
                     hostDisplayOff = false
                     applyImmersive()
                 },
-                onSurfaceReady = { decoder = it },
+                onSurfaceReady = { d ->
+                    // Streaming UI mounts only after `connected`, so the Mac's
+                    // opening IDR (and its SPS/PPS) is often already on the
+                    // wire before this surface exists — without a fresh
+                    // keyframe MediaCodec never starts and the panel stays
+                    // blank/green. Ask immediately once the texture is live.
+                    decoder = d
+                    if (session?.isConnected == true) {
+                        session?.sendControl(mapOf("type" to "kf"))
+                    }
+                },
                 onSurfaceDestroyed = {
                     decoder?.release()
                     decoder = null

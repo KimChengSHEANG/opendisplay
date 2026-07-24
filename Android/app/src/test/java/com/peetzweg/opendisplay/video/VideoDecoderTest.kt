@@ -40,4 +40,28 @@ class VideoDecoderTest {
         val nalus = VideoDecoder.splitAnnexB(byteArrayOf(1, 2, 3))
         assertEquals(0, nalus.size)
     }
+
+    @Test
+    fun annexBWithoutParameterSets_stripsSpsPpsKeepsIdr() {
+        val sps = byteArrayOf(0x67, 0x42, 0x00)
+        val pps = byteArrayOf(0x68, 0xCE.toByte())
+        val idr = byteArrayOf(0x65, 0x01, 0x02, 0x03)
+        val data = byteArrayOf(0, 0, 0, 1) + sps +
+            byteArrayOf(0, 0, 0, 1) + pps +
+            byteArrayOf(0, 0, 0, 1) + idr
+
+        val stripped = VideoDecoder.annexBWithoutParameterSets(data)!!
+        val nalus = VideoDecoder.splitAnnexB(stripped)
+
+        assertEquals(1, nalus.size)
+        assertArrayEquals(idr, nalus[0])
+    }
+
+    @Test
+    fun annexBWithoutParameterSets_onlyParameterSets_returnsNull() {
+        val sps = byteArrayOf(0x67, 0x42)
+        val pps = byteArrayOf(0x68, 0xCE.toByte())
+        val data = byteArrayOf(0, 0, 0, 1) + sps + byteArrayOf(0, 0, 0, 1) + pps
+        assertEquals(null, VideoDecoder.annexBWithoutParameterSets(data))
+    }
 }
