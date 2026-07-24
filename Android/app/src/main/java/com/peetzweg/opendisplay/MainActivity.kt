@@ -25,6 +25,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.peetzweg.opendisplay.net.DiscoveryAdvertiser
 import com.peetzweg.opendisplay.session.InstallId
 import com.peetzweg.opendisplay.session.ReceiverSession
@@ -105,6 +108,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         deviceName = DiscoveryAdvertiser.deviceName(this)
         showAnalytics = AppSettings.showAnalytics(this)
         if (!lockReceiverRegistered) {
@@ -125,6 +129,7 @@ class MainActivity : ComponentActivity() {
                 onWake = {
                     hostSleep.wake()
                     hostDisplayOff = false
+                    applyImmersive()
                 },
                 onSurfaceReady = { decoder = it },
                 onSurfaceDestroyed = {
@@ -209,6 +214,28 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Edge-to-edge immersive mode while a session owns the panel (streaming or
+     * host-display-off): hide the status/navigation bars so the mirrored
+     * display fills the screen, matching the iOS receiver. Bars come back on a
+     * swipe (transient) and whenever we return to idle/settings.
+     */
+    private fun applyImmersive() {
+        val immersive = connected || hostDisplayOff
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        if (immersive) controller.hide(WindowInsetsCompat.Type.systemBars())
+        else controller.show(WindowInsetsCompat.Type.systemBars())
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // The system restores the bars on focus loss (e.g. a dialog); reassert
+        // immersive when we regain focus and still own the panel.
+        if (hasFocus) applyImmersive()
+    }
+
     private fun setWindowBrightness(value: Float?) {
         val attrs = window.attributes
         if (value == null) {
@@ -227,6 +254,7 @@ class MainActivity : ComponentActivity() {
                 hostSleep.onConnected()
                 hostDisplayOff = hostSleep.hostDisplayOff
                 window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                applyImmersive()
                 frameCount = 0
                 fpsHandler.removeCallbacks(fpsTicker)
                 fpsHandler.postDelayed(fpsTicker, 1000)
@@ -237,6 +265,7 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 connected = false
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                applyImmersive()
                 fpsHandler.removeCallbacks(fpsTicker)
                 fps = 0
             }
@@ -252,6 +281,7 @@ class MainActivity : ComponentActivity() {
                 WireMessage.hostSleeping -> runOnUiThread {
                     hostSleep.onHostSleeping()
                     hostDisplayOff = true
+                    applyImmersive()
                 }
                 // welcome/updateRequired: peer-driven update signals — see `VersionGate`.
                 WireMessage.welcome, WireMessage.updateRequired -> {

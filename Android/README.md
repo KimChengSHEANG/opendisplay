@@ -57,5 +57,19 @@ equivalent of joining the iOS TestFlight beta.
   via `adb forward`. Install platform-tools on the Mac if the app shows a missing-`adb`
   banner (`brew install --cask android-platform-tools`).
 
+## Staying awake while streaming
+
+v1 keeps the display alive with an **Activity-scoped `FLAG_KEEP_SCREEN_ON`**
+only — the screen stays on and immersive (system bars hidden) while a session
+is connected or the host display is off, and the flag is cleared on disconnect.
+
+A **foreground service (FGS) is intentionally deferred**. The receiver is meant
+to run in the foreground on a dedicated/plugged-in secondary screen, so the
+Activity keep-screen-on covers the v1 use case without the extra
+`FOREGROUND_SERVICE` permission, notification channel, and lifecycle plumbing.
+If a future version needs streaming to survive the app being backgrounded (or
+another app taking focus), add a minimal `mediaProjection`/`connectedDevice`
+foreground service started on connect and stopped on disconnect.
+
 See the root [README.md](../README.md) and [COMPATIBILITY.md](../COMPATIBILITY.md)
 for Mac-side setup and protocol notes.

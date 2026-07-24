@@ -24,8 +24,13 @@ class VideoDecoder(private val surface: Surface) {
     /** Feed one Annex B access unit (one or more start-code-delimited NAL units). */
     @Synchronized
     fun feedAnnexB(frame: ByteArray) {
+        val parametersChanged = scanForParameterSets(frame)
+        // Mid-stream SPS/PPS change (e.g. the Mac's virtual display resized or
+        // rotated) can't be applied to a running codec — tear it down and
+        // reconfigure with the new parameter sets. Mirrors iOS resetting its
+        // `formatDesc` when SPS/PPS change. See `PhoneReceiver.swift`.
+        if (codec != null && parametersChanged) releaseCodec()
         if (codec == null) {
-            scanForParameterSets(frame)
             val s = sps
             val p = pps
             if (s != null && p != null) startCodec(s, p) else return
@@ -45,13 +50,19 @@ class VideoDecoder(private val surface: Surface) {
         }
     }
 
-    /** Releases the underlying codec. Safe to call more than once. */
+    /** Releases the underlying codec and clears cached parameter sets. */
     @Synchronized
     fun release() {
-        val c = codec
-        codec = null
+        releaseCodec()
         sps = null
         pps = null
+    }
+
+    /** Stop and release the codec, but keep the (possibly updated) SPS/PPS so
+     *  [feedAnnexB] can immediately reconfigure. Safe to call more than once. */
+    private fun releaseCodec() {
+        val c = codec
+        codec = null
         if (c == null) return
         try {
             c.stop()
@@ -71,14 +82,17 @@ class VideoDecoder(private val surface: Surface) {
         }
     }
 
-    private fun scanForParameterSets(frame: ByteArray) {
+    /** Updates cached SPS/PPS from [frame]; returns true if either changed. */
+    private fun scanForParameterSets(frame: ByteArray): Boolean {
+        var changed = false
         for (nalu in splitAnnexB(frame)) {
             if (nalu.isEmpty()) continue
             when (nalu[0].toInt() and 0x1F) {
-                NAL_SPS -> sps = nalu
-                NAL_PPS -> pps = nalu
+                NAL_SPS -> if (!nalu.contentEquals(sps)) { sps = nalu; changed = true }
+                NAL_PPS -> if (!nalu.contentEquals(pps)) { pps = nalu; changed = true }
             }
         }
+        return changed
     }
 
     private fun startCodec(sps: ByteArray, pps: ByteArray) {
