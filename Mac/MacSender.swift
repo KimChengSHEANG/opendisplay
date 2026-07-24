@@ -91,7 +91,8 @@ enum StreamFrameRate: Int, CaseIterable, Identifiable {
     }
 
     static func `default`(forDeviceKind kind: String?) -> StreamFrameRate {
-        kind == "Chromebook" ? .fps30 : .fps60
+        // Chromebook VDA handles full-panel @ 60 like iPhone HW decode.
+        .fps60
     }
 }
 
@@ -498,31 +499,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    /// Capture/encode size from the receiver's announced **panel pixels**
-    /// (not VD points×2). More Space / Larger Text only change macOS workspace
-    /// density; encoding against inflated points made Chromebook soft (e.g.
-    /// More Space + Fast → 1500p upscaled to 2400).
+    /// Capture/encode size from the receiver's announced **panel pixels**.
+    /// Same path for iPhone/iPad and Chromebook (HW VDA @ full panel).
     private static func capturePlan(
         panelWide: Int, panelHigh: Int,
         quality: StreamQuality, frameRate: StreamFrameRate, deviceKind: String?
     ) -> (width: Int, height: Int, bitrate: Int, fps: Int) {
         let scale = quality.scale
-        var bitrate = quality.bitrate
+        let bitrate = quality.bitrate
         let fps = frameRate.rawValue
-        // Software AVC on Cheets: 1920 long edge stays sharp on 2400 panels
-        // without the multi-second lag of Best@2400.
-        let maxLongEdge = deviceKind == "Chromebook" ? 1920 : Int.max
-        if deviceKind == "Chromebook" {
-            bitrate = min(bitrate, 12_000_000)
-        }
-        var width = max(2, Int(Double(panelWide) * scale) & ~1)
-        var height = max(2, Int(Double(panelHigh) * scale) & ~1)
-        let longEdge = max(width, height)
-        if longEdge > maxLongEdge {
-            let s = Double(maxLongEdge) / Double(longEdge)
-            width = max(2, Int(Double(width) * s) & ~1)
-            height = max(2, Int(Double(height) * s) & ~1)
-        }
+        let width = max(2, Int(Double(panelWide) * scale) & ~1)
+        let height = max(2, Int(Double(panelHigh) * scale) & ~1)
         return (width, height, bitrate, fps)
     }
 

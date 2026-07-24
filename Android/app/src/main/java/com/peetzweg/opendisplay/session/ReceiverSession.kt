@@ -134,6 +134,17 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
 
     private fun handleClient(socket: Socket) {
         closeClient()
+        // Match iOS NWProtocolTCP.noDelay + interactiveVideo: tiny control
+        // packets (touch/cursor) must not wait on Nagle, and video should
+        // drain without stalling the reader behind a soft decode.
+        try {
+            socket.tcpNoDelay = true
+            socket.receiveBufferSize = 2 * 1024 * 1024
+            socket.sendBufferSize = 256 * 1024
+            socket.trafficClass = 0x10 // IPTOS_LOWDELAY
+        } catch (_: Exception) {
+            // Best-effort — some ARC stacks reject trafficClass.
+        }
         clientSocket = socket
         outputStream = socket.getOutputStream()
         listener.onConnected()

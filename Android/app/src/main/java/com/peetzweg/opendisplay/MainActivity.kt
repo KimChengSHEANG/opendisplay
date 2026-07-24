@@ -67,6 +67,8 @@ class MainActivity : ComponentActivity() {
         if (session?.isConnected != true) return@Runnable
         if (!d.hasRendered) session?.sendControl(mapOf("type" to "kf"))
     }
+    /** Throttle decoder-driven keyframe asks so scroll doesn't IDR-spam. */
+    private var lastDecoderKfAtMs: Long = 0
     private var advertiser: DiscoveryAdvertiser? = null
     private var savedBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
     private var lockReceiverRegistered = false
@@ -242,11 +244,16 @@ class MainActivity : ComponentActivity() {
             unregisterReceiver(lockReceiver)
             lockReceiverRegistered = false
         }
-        hostSleep.onAppQuitting()
-        session?.stop()
-        session = null
-        advertiser?.stop()
-        advertiser = null
+        // ChromeOS can recreate the activity on config/density changes; don't
+        // announce `closing` or tear the listener — mirrors iOS surviving
+        // background linger. Real quit still reaches here without that flag.
+        if (!isChangingConfigurations) {
+            hostSleep.onAppQuitting()
+            session?.stop()
+            session = null
+            advertiser?.stop()
+            advertiser = null
+        }
         decoder?.release()
         decoder = null
         fpsHandler.removeCallbacks(fpsTicker)
@@ -340,7 +347,15 @@ class MainActivity : ComponentActivity() {
                 if (VideoDecoder.containsIdr(data)) pendingSyncFrame = data.copyOf()
                 return
             }
+            // Non-blocking: decode runs on VideoDecoder's thread (iOS-style).
             d.feedAnnexB(data)
+            if (d.consumeNeedsKeyframe()) {
+                val now = System.currentTimeMillis()
+                if (now - lastDecoderKfAtMs >= 2000) {
+                    lastDecoderKfAtMs = now
+                    session?.sendControl(mapOf("type" to "kf"))
+                }
+            }
         }
 
         override fun onControl(map: Map<String, Any>) {

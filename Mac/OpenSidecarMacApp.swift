@@ -978,8 +978,6 @@ final class SenderController: ObservableObject {
         for key in keys {
             if let raw = frameRateByDevice[key], let intVal = Int(raw),
                let value = StreamFrameRate(rawValue: intVal) {
-                // 60fps software decode on Cheets can't keep up — keep 30.
-                if kind == "Chromebook" && value == .fps60 { return .fps30 }
                 return value
             }
         }

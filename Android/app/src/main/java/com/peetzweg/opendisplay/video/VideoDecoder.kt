@@ -7,34 +7,118 @@ import android.os.Build
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Decodes an Annex B `video/avc` (H.264) elementary stream onto [surface] via
- * `MediaCodec`. On ChromeOS ARC the hardware `c2.vda.avc.decoder` path often
- * paints a solid green TextureView even after a successful format change —
- * we prefer a software AVC decoder there. Elsewhere we use the default
- * hardware decoder.
+ * Annex-B H.264 → [MediaCodec] → [surface], paced like the iOS receiver.
  *
- * Codec starts on the first in-band SPS+PPS (Mac prepends both on keyframes).
- * Parameter sets go into `csd-0`/`csd-1` only; VCL NALs are queued as input.
+ * iOS default path (`AVSampleBufferDisplayLayer`):
+ * - Enqueue is non-blocking on the network thread
+ * - Every access unit is fed in order (no mid-GOP drops)
+ * - `DisplayImmediately` — present as soon as decoded
+ *
+ * We mirror that with a dedicated decode thread + bounded in-order queue, and
+ * only apply latest-wins on **output** buffers (skip display backlog).
+ *
+ * ChromeOS ARC: prefer `c2.vda.avc.decoder` on SurfaceView for full-panel HW.
  */
 class VideoDecoder(
     private val surface: Surface,
     private val preferSoftware: Boolean = false,
+    /** Prefer ARC `c2.vda.avc.decoder` (Chromebook hardware). */
+    private val preferHardwareAvc: Boolean = false,
 ) {
     private var codec: MediaCodec? = null
     private var sps: ByteArray? = null
     private var pps: ByteArray? = null
     private val bufferInfo = MediaCodec.BufferInfo()
 
-    /** True after at least one decoded buffer has been released to the surface. */
+    /** In-order AUs waiting for decode — capacity keeps latency bounded. */
+    private val queue = ArrayBlockingQueue<ByteArray>(QUEUE_CAP)
+    private val drainScheduled = AtomicBoolean(false)
+    private var droppedSinceKf: Int = 0
+    private val decodeExecutor: ExecutorService = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "VideoDecoder").apply {
+            isDaemon = true
+            priority = Thread.MAX_PRIORITY
+        }
+    }
+    private val released = AtomicBoolean(false)
+
     @Volatile
     var hasRendered: Boolean = false
         private set
 
-    /** Feed one Annex B access unit (one or more start-code-delimited NAL units). */
-    @Synchronized
+    @Volatile
+    private var keyframeRequested: Boolean = false
+
+    fun consumeNeedsKeyframe(): Boolean {
+        if (!keyframeRequested) return false
+        keyframeRequested = false
+        droppedSinceKf = 0
+        return true
+    }
+
+    /**
+     * Non-blocking — safe to call from the TCP reader (iOS enqueue analogue).
+     * Preserves decode order. Dropping mid-GOP is rare; we only ask for an
+     * IDR after several drops so scroll isn't hitch-spammed with keyframes.
+     */
     fun feedAnnexB(frame: ByteArray) {
+        if (released.get()) return
+        val copy = frame.copyOf()
+        if (!queue.offer(copy)) {
+            noteDrop()
+            return
+        }
+        if (drainScheduled.compareAndSet(false, true)) {
+            decodeExecutor.execute { drainQueue() }
+        }
+    }
+
+    private fun noteDrop() {
+        droppedSinceKf++
+        if (droppedSinceKf >= DROP_KF_THRESHOLD) {
+            keyframeRequested = true
+        }
+    }
+
+    fun release() {
+        released.set(true)
+        queue.clear()
+        decodeExecutor.execute {
+            synchronized(this@VideoDecoder) {
+                releaseCodec()
+                sps = null
+                pps = null
+                hasRendered = false
+                keyframeRequested = false
+            }
+        }
+        decodeExecutor.shutdown()
+    }
+
+    private fun drainQueue() {
+        try {
+            while (!released.get()) {
+                val frame = queue.poll() ?: break
+                synchronized(this) {
+                    if (!released.get()) decodeOne(frame)
+                }
+            }
+        } finally {
+            drainScheduled.set(false)
+            if (!released.get() && queue.isNotEmpty() && drainScheduled.compareAndSet(false, true)) {
+                decodeExecutor.execute { drainQueue() }
+            }
+        }
+    }
+
+    @Synchronized
+    private fun decodeOne(frame: ByteArray) {
         val parametersChanged = scanForParameterSets(frame)
         if (codec != null && parametersChanged) releaseCodec()
         if (codec == null) {
@@ -46,33 +130,31 @@ class VideoDecoder(
         val isSync = containsIdr(frame)
         val c = codec ?: return
         try {
-            var index = c.dequeueInputBuffer(TIMEOUT_US)
+            drainOutput(c)
+            var index = c.dequeueInputBuffer(0)
             if (index < 0 && isSync) {
                 index = c.dequeueInputBuffer(SYNC_TIMEOUT_US)
             }
-            if (index >= 0) {
-                val input = c.getInputBuffer(index) ?: return
-                if (accessUnit.size > input.capacity()) {
-                    Log.w(TAG, "input too large: ${accessUnit.size} > ${input.capacity()}")
-                    return
-                }
-                input.clear()
-                input.put(accessUnit)
-                val flags = if (isSync) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
-                c.queueInputBuffer(index, 0, accessUnit.size, System.nanoTime() / 1000, flags)
+            if (index < 0) {
+                // Soft decode backed up — skip this AU; heal only after
+                // several misses so we don't IDR-pulse during scroll.
+                if (!isSync) noteDrop()
+                drainOutput(c)
+                return
             }
+            val input = c.getInputBuffer(index) ?: return
+            if (accessUnit.size > input.capacity()) {
+                Log.w(TAG, "input too large: ${accessUnit.size} > ${input.capacity()}")
+                return
+            }
+            input.clear()
+            input.put(accessUnit)
+            val flags = if (isSync) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+            c.queueInputBuffer(index, 0, accessUnit.size, System.nanoTime() / 1000, flags)
             drainOutput(c)
         } catch (e: IllegalStateException) {
-            Log.w(TAG, "feedAnnexB: ${e.message}")
+            Log.w(TAG, "decodeOne: ${e.message}")
         }
-    }
-
-    @Synchronized
-    fun release() {
-        releaseCodec()
-        sps = null
-        pps = null
-        hasRendered = false
     }
 
     private fun releaseCodec() {
@@ -90,17 +172,28 @@ class VideoDecoder(
         }
     }
 
+    /** Present only the newest decoded buffer (DisplayImmediately analogue). */
     private fun drainOutput(c: MediaCodec) {
+        var latest = -1
         while (true) {
             val index = c.dequeueOutputBuffer(bufferInfo, 0)
-            if (index == MediaCodec.INFO_TRY_AGAIN_LATER) return
+            if (index == MediaCodec.INFO_TRY_AGAIN_LATER) break
             if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 Log.i(TAG, "output format: ${c.outputFormat}")
                 continue
             }
             if (index == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) continue
-            if (index < 0) return
-            c.releaseOutputBuffer(index, true)
+            if (index < 0) break
+            if (latest >= 0) {
+                try {
+                    c.releaseOutputBuffer(latest, false)
+                } catch (_: IllegalStateException) {
+                }
+            }
+            latest = index
+        }
+        if (latest >= 0) {
+            c.releaseOutputBuffer(latest, true)
             hasRendered = true
         }
     }
@@ -122,6 +215,12 @@ class VideoDecoder(
         format.setByteBuffer("csd-0", ByteBuffer.wrap(START_CODE + sps))
         format.setByteBuffer("csd-1", ByteBuffer.wrap(START_CODE + pps))
         format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 2 * 1024 * 1024)
+        if (Build.VERSION.SDK_INT >= 30) {
+            format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+        }
+        if (Build.VERSION.SDK_INT >= 23) {
+            format.setInteger(MediaFormat.KEY_PRIORITY, 0)
+        }
         try {
             val c = createCodec()
             Log.i(TAG, "configure ${c.name} software=$preferSoftware")
@@ -136,9 +235,6 @@ class VideoDecoder(
 
     private fun createCodec(): MediaCodec {
         if (preferSoftware) {
-            // Prefer known software names first — MediaCodecList ordering on
-            // ARC often returns c2.vda.avc.decoder as the "default" AVC path,
-            // which greens TextureView/SurfaceView composites on Cheets.
             for (name in SOFTWARE_AVC_NAMES) {
                 try {
                     return MediaCodec.createByCodecName(name)
@@ -154,13 +250,24 @@ class VideoDecoder(
                 }
             }
             Log.w(TAG, "no software AVC decoder; falling back to default")
+        } else if (preferHardwareAvc) {
+            for (name in HARDWARE_AVC_NAMES) {
+                try {
+                    return MediaCodec.createByCodecName(name)
+                } catch (e: Exception) {
+                    Log.w(TAG, "hardware codec $name failed: ${e.message}")
+                }
+            }
+            Log.w(TAG, "no named VDA AVC; falling back to default")
         }
         return MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
     }
 
     companion object {
         private const val TAG = "VideoDecoder"
-        private const val TIMEOUT_US = 10_000L
+        private const val QUEUE_CAP = 8
+        /** Ask Mac for IDR only after this many undecodeable drops. */
+        private const val DROP_KF_THRESHOLD = 6
         private const val SYNC_TIMEOUT_US = 100_000L
         private const val NAL_SPS = 7
         private const val NAL_PPS = 8
@@ -168,38 +275,21 @@ class VideoDecoder(
         private const val DEFAULT_WIDTH = 1280
         private const val DEFAULT_HEIGHT = 720
         private val START_CODE = byteArrayOf(0, 0, 0, 1)
+        // OMX.google first: reliable soft path; c2.android often fails init.
         private val SOFTWARE_AVC_NAMES = listOf(
-            "c2.android.avc.decoder",
             "OMX.google.h264.decoder",
+            "c2.android.avc.decoder",
+        )
+        private val HARDWARE_AVC_NAMES = listOf(
+            "c2.vda.avc.decoder",
         )
 
         fun containsIdr(frame: ByteArray): Boolean =
             splitAnnexB(frame).any { it.isNotEmpty() && (it[0].toInt() and 0x1F) == NAL_IDR }
 
-        /**
-         * ChromeOS ARC's VDA hardware path frequently composites green onto
-         * TextureView; software AVC is the reliable fallback there.
-         */
         fun preferSoftwareDecoder(): Boolean {
-            val tags = listOf(
-                Build.DEVICE?.lowercase().orEmpty(),
-                Build.MODEL?.lowercase().orEmpty(),
-                Build.PRODUCT?.lowercase().orEmpty(),
-                Build.BRAND?.lowercase().orEmpty(),
-                Build.MANUFACTURER?.lowercase().orEmpty(),
-            )
-            if (tags.any { it.contains("chromebook") || it.contains("chromeos") || it.contains("cheets") }) {
-                return true
-            }
-            // ARC feature flags (set on ChromeOS Android containers).
-            return try {
-                val clazz = Class.forName("android.os.SystemProperties")
-                val get = clazz.getMethod("get", String::class.java, String::class.java)
-                val arc = get.invoke(null, "ro.boot.container", "") as String
-                arc.isNotEmpty()
-            } catch (_: Exception) {
-                false
-            }
+            // Chromebook now uses VDA hardware on SurfaceView; soft is fallback only.
+            return false
         }
 
         private fun findSoftwareAvcDecoder(): String? {
@@ -217,8 +307,7 @@ class VideoDecoder(
                         || name.startsWith("c2.android.", ignoreCase = true)
                 }
                 if (!isSoftware) continue
-                // Prefer modern c2 software over legacy OMX.google.
-                if (name.contains("c2.android", ignoreCase = true)) return name
+                if (name.contains("google", ignoreCase = true)) return name
                 if (soft == null) soft = name
             }
             return soft

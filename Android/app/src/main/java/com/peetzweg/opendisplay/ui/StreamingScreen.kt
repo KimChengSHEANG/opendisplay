@@ -32,9 +32,9 @@ import java.util.Base64
  * Fullscreen video surface the Mac's stream is decoded onto, with a sibling
  * [ImageView] for the local cursor sprite.
  *
- * ChromeOS ARC: [SurfaceView] + software AVC. TextureView + VDA paints solid
- * green; VDA on SurfaceView does too on Cheets. Software is slower, so the Mac
- * caps Chromebook encode size/fps. Phones/tablets keep [TextureView] + HW.
+ * ChromeOS ARC: [SurfaceView] + hardware `c2.vda.avc.decoder` (full panel).
+ * TextureView + VDA historically painted solid green on Cheets; SurfaceView
+ * is the BufferQueue path VDA expects. Phones/tablets keep [TextureView] + HW.
  * Cursor position is applied by [cursorController] directly (not Compose).
  */
 @Composable
@@ -81,27 +81,31 @@ fun StreamingScreen(
                             PointerIcon.TYPE_NULL,
                         )
                     }
+                    var started = false
                     surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-                        override fun surfaceCreated(holder: SurfaceHolder) {
-                            // VDA hardware paints solid green on Cheets even
-                            // with SurfaceView; software AVC is the reliable
-                            // path. Mac clamps Chromebook encode (~1920@30).
-                            onSurfaceReady(
-                                VideoDecoder(
-                                    holder.surface,
-                                    preferSoftware = true,
-                                ),
-                            )
-                        }
+                        override fun surfaceCreated(holder: SurfaceHolder) {}
 
                         override fun surfaceChanged(
                             holder: SurfaceHolder,
                             format: Int,
                             width: Int,
                             height: Int,
-                        ) {}
+                        ) {
+                            // Wait for a real size before binding VDA — a 0×0
+                            // surface is a common ARC green-screen trigger.
+                            if (started || width <= 0 || height <= 0) return
+                            started = true
+                            onSurfaceReady(
+                                VideoDecoder(
+                                    holder.surface,
+                                    preferSoftware = false,
+                                    preferHardwareAvc = true,
+                                ),
+                            )
+                        }
 
                         override fun surfaceDestroyed(holder: SurfaceHolder) {
+                            started = false
                             onSurfaceDestroyed()
                         }
                     })
