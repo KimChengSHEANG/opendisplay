@@ -95,6 +95,7 @@ enum MainWindow {
 enum ConnectionTarget: Hashable {
     case usb(udid: String?)           // wired via built-in usbmuxd; nil = first device
     case wifi(NWBrowser.Result)       // discovered via Bonjour
+    case androidUsb(serial: String)   // wired via `adb reverse` → local TCP
 
     /// Stable identity for sessions and persistence — survives Bonjour
     /// re-discovery (fresh NWBrowser.Result) and USB replugs (new DeviceID).
@@ -104,6 +105,7 @@ enum ConnectionTarget: Hashable {
         case .wifi(let result):
             if case .service(let name, _, _, _) = result.endpoint { return "wifi:\(name)" }
             return "wifi:unknown"
+        case .androidUsb(let serial): return "adb:\(serial)"
         }
     }
 }
@@ -152,6 +154,10 @@ final class DeviceSession: ObservableObject, Identifiable {
         if case .usb(let udid) = target {
             onUSB = true
             usbUDID = udid
+        } else if case .androidUsb = target {
+            // Reverse-tunnelled over the cable — a USB transport, but tracked
+            // separately (no usbmux DeviceID, so failover/migration skips it).
+            onUSB = true
         } else {
             onUSB = false
         }
@@ -176,6 +182,7 @@ final class SenderController: ObservableObject {
     @Published var sessions: [DeviceSession] = []
     @Published var discovered: [NWBrowser.Result] = []
     @Published var usbDevices: [UsbmuxDevice] = []
+    @Published var androidDevices: [AdbDevice] = []
     // `-host x.x.x.x` / `-port n` bypass usbmuxd with a manual TCP endpoint
     // (debugging escape hatch, e.g. an iproxy or SSH tunnel).
     @Published var host = UserDefaults.standard.string(forKey: "host") ?? "127.0.0.1"
@@ -190,6 +197,7 @@ final class SenderController: ObservableObject {
 
     private var browser: NWBrowser?
     private var usbWatcher: UsbmuxDeviceWatcher?
+    private var adbWatcher: AdbDeviceWatcher?
 
     // Connection policy — one session per physical device, and the cable
     // wins whenever it's available (lower, steadier latency than WiFi):
@@ -208,6 +216,11 @@ final class SenderController: ObservableObject {
     // `-autostart NO` disables all auto-connecting, including migrations.
     private var usbDisabled = Set(UserDefaults.standard.stringArray(forKey: "usbDisabled") ?? []) {
         didSet { UserDefaults.standard.set(Array(usbDisabled), forKey: "usbDisabled") }
+    }
+    // Android reverse-USB counterpart of usbDisabled: serials the user
+    // explicitly disconnected, so they don't auto-reconnect on the next poll.
+    private var adbDisabled = Set(UserDefaults.standard.stringArray(forKey: "adbDisabled") ?? []) {
+        didSet { UserDefaults.standard.set(Array(adbDisabled), forKey: "adbDisabled") }
     }
     private var wifiRemembered = Set(UserDefaults.standard.stringArray(forKey: "wifiRemembered") ?? []) {
         didSet { UserDefaults.standard.set(Array(wifiRemembered), forKey: "wifiRemembered") }
@@ -247,6 +260,12 @@ final class SenderController: ObservableObject {
             self.failover(detachedUDIDs: detached)
             self.autoConnect()
         }
+        adbWatcher = AdbDeviceWatcher { [weak self] devices in
+            guard let self else { return }
+            self.androidDevices = devices
+            self.autoConnect()
+        }
+        adbWatcher?.start()
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(2))
             self.wifiAutoConnectArmed = true
@@ -354,6 +373,15 @@ final class SenderController: ObservableObject {
                 connect(to: .usb(udid: device.udid))
             }
         }
+        // Android over the cable: auto-connect authorized serials the user
+        // hasn't opted out of. Unauthorized devices wait for the on-phone
+        // "Allow USB debugging?" tap before they show a serial we can dial.
+        for device in androidDevices where device.authorized {
+            let target = ConnectionTarget.androidUsb(serial: device.serial)
+            if !adbDisabled.contains(target.sessionID), session(for: target.sessionID) == nil {
+                connect(to: target)
+            }
+        }
         guard wifiAutoConnectArmed, Date() < wifiAutoConnectDeadline else { return }
         for result in discovered {
             let target = ConnectionTarget.wifi(result)
@@ -417,7 +445,7 @@ final class SenderController: ObservableObject {
     /// Prefer a live Bonjour result after a long sleep; USB targets are stable.
     private func refreshed(_ target: ConnectionTarget) -> ConnectionTarget {
         switch target {
-        case .usb:
+        case .usb, .androidUsb:
             return target
         case .wifi:
             let id = target.sessionID
@@ -530,6 +558,8 @@ final class SenderController: ObservableObject {
             return udid == nil ? "Manual (\(host):\(port))" : "iPhone / iPad"
         case .wifi(let result):
             return serviceName(of: result) ?? "WiFi device"
+        case .androidUsb:
+            return "Android"
         }
     }
 
@@ -588,6 +618,7 @@ final class SenderController: ObservableObject {
         switch target {
         case .usb: usbDisabled.remove(id)
         case .wifi: wifiRemembered.insert(id)
+        case .androidUsb: adbDisabled.remove(id)
         }
 
         let transport: SenderTransport
@@ -603,6 +634,19 @@ final class SenderController: ObservableObject {
             }
         case .wifi(let result):
             transport = .tcp(result.endpoint)
+        case .androidUsb(let serial):
+            guard let portNum = UInt16(port) else { return }
+            // Open the reverse tunnel before dialing: the phone's
+            // localhost:port now routes back to this Mac, so the plain TCP
+            // sender reaches the receiver at 127.0.0.1 as if it were local.
+            do {
+                try Adb.reverse(serial: serial, port: portNum)
+            } catch {
+                Log.info("adb reverse failed for \(serial): \(error)")
+                return
+            }
+            transport = .tcp(.hostPort(host: "127.0.0.1",
+                                       port: NWEndpoint.Port(rawValue: portNum)!))
         }
 
         let name = label(for: target)
@@ -679,6 +723,9 @@ final class SenderController: ObservableObject {
         switch session.target {
         case .usb: usbDisabled.insert(session.id)
         case .wifi: wifiRemembered.remove(session.id)
+        case .androidUsb(let serial):
+            adbDisabled.insert(session.id)
+            try? Adb.clearReverse(serial: serial)
         }
         // A migrated session is also reachable the other way — opt that side
         // out too, or auto-connect resurrects the device moments later.
@@ -758,6 +805,15 @@ final class SenderController: ObservableObject {
             coveredSessionIDs.insert(target.sessionID)
             entries.append(DeviceEntry(id: target.sessionID, name: label(for: target),
                                        usbTarget: target, wifiTarget: nil))
+        }
+        for device in androidDevices {
+            let target = ConnectionTarget.androidUsb(serial: device.serial)
+            coveredSessionIDs.insert(target.sessionID)
+            entries.append(DeviceEntry(
+                id: "android:\(device.serial)",
+                name: device.authorized ? "Android" : "Android (tap Allow on phone)",
+                usbTarget: device.authorized ? target : nil,
+                wifiTarget: nil))
         }
         for result in discovered {
             guard let name = serviceName(of: result), !mergedServices.contains(name)

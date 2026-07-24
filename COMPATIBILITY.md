@@ -148,6 +148,10 @@ the floor once a force-capable build has spread.
 - Mac supports iOS receivers **≥ N releases back** — _N is TBD (see open
   questions); until decided, "all protocol-1 receivers."_
 - iOS supports Macs back to protocol 1 (no floor raised yet).
+- **Android receivers over USB require `adb`** on the Mac (Android
+  platform-tools) — there is no usbmuxd equivalent, so the wired transport
+  shells out to `adb reverse`. WiFi (Bonjour) needs no external tool. The wire
+  protocol is identical across transports and platforms.
 
 **Breaking changes are two-phase (never one-shot):**
 
