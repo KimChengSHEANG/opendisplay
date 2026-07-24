@@ -32,7 +32,7 @@ import java.util.Base64
  * Every device gets [SurfaceView]: ChromeOS ARC pairs it with the hardware
  * `c2.vda.avc.decoder` (full panel) — SurfaceView is the BufferQueue path VDA
  * expects. Phones and tablets get SurfaceView too, so SurfaceFlinger can
- * promote it to a hardware overlay, and use their own hardware AVC decoder
+ * promote it to a hardware overlay; they keep their own hardware AVC decoder
  * via `MediaCodec.createDecoderByType`.
  * Cursor position is applied by [cursorController] directly (not Compose).
  */
