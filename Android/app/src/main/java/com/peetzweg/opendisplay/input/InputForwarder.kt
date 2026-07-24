@@ -27,6 +27,18 @@ class InputForwarder(private val send: (Map<String, Any>) -> Unit) {
     private var lastFocusY = 0f
     private var lastNormX = 0.5
     private var lastNormY = 0.5
+    private var lastHoverSendMs = 0L
+    private var pendingHoverX = 0f
+    private var pendingHoverY = 0f
+    private var pendingHoverW = 0
+    private var pendingHoverH = 0
+    private var hoverFlushPending = false
+
+    /**
+     * Optional UI-thread scheduler for trailing hover flush after coalesce.
+     * `(delayMs, runnable)` — typically `view.postDelayed`.
+     */
+    var scheduleHoverFlush: ((Long, () -> Unit) -> Unit)? = null
 
     /** First finger touches down. */
     fun down(x: Float, y: Float, width: Int, height: Int) {
@@ -44,10 +56,40 @@ class InputForwarder(private val send: (Map<String, Any>) -> Unit) {
     /**
      * Mouse/trackpad hover (no button): Mac treats touch `moved` while up as
      * `mouseMoved`. Chromebook ARC delivers these as ACTION_HOVER_MOVE.
+     *
+     * Coalesced to ~120Hz ([HOVER_MIN_INTERVAL_MS]) so the control channel
+     * isn't flooded; a trailing flush still delivers the last sample.
      */
     fun hover(x: Float, y: Float, width: Int, height: Int) {
         if (twoFingerActive || multiTouchOccurred) return
-        touch("moved", x, y, width, height)
+        val now = System.currentTimeMillis()
+        pendingHoverX = x
+        pendingHoverY = y
+        pendingHoverW = width
+        pendingHoverH = height
+        val elapsed = now - lastHoverSendMs
+        if (elapsed >= HOVER_MIN_INTERVAL_MS) {
+            lastHoverSendMs = now
+            hoverFlushPending = false
+            touch("moved", x, y, width, height)
+            return
+        }
+        if (!hoverFlushPending) {
+            hoverFlushPending = true
+            val delay = (HOVER_MIN_INTERVAL_MS - elapsed).coerceAtLeast(1L)
+            scheduleHoverFlush?.invoke(delay) {
+                if (!hoverFlushPending) return@invoke
+                hoverFlushPending = false
+                lastHoverSendMs = System.currentTimeMillis()
+                touch("moved", pendingHoverX, pendingHoverY, pendingHoverW, pendingHoverH)
+            }
+                ?: run {
+                    // No scheduler (unit tests): send immediately.
+                    hoverFlushPending = false
+                    lastHoverSendMs = now
+                    touch("moved", x, y, width, height)
+                }
+        }
     }
 
     /** The single tracked finger lifted. Ignored once a second finger has joined this gesture. */
@@ -110,6 +152,9 @@ class InputForwarder(private val send: (Map<String, Any>) -> Unit) {
     }
 
     companion object {
+        /** Match Mac cursor poll (120Hz) — don't outrun injection. */
+        private const val HOVER_MIN_INTERVAL_MS = 8L
+
         /** View-pixel `(x, y)` within a `width`×`height` view, clamped to `[0,1]`. */
         fun normalize(x: Float, y: Float, width: Int, height: Int): Pair<Double, Double> {
             if (width <= 0 || height <= 0) return 0.5 to 0.5

@@ -2,6 +2,7 @@ package com.peetzweg.opendisplay.ui
 
 import android.graphics.Bitmap
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.View
 import android.widget.FrameLayout
@@ -10,15 +11,14 @@ import android.widget.ImageView
 /**
  * Local Mac cursor overlay that bypasses Compose.
  *
- * Position packets arrive at up to ~120Hz. Routing them through
- * `mutableStateOf` → recomposition → `AndroidView.update` was the Chromebook
- * lag source (full Compose passes + `layoutParams` writes every move). iOS
- * updates a `CALayer` directly; we do the same with an [ImageView]:
- * size/sprite via layout params only when they change, position via
- * `translationX`/`translationY` (no layout).
+ * iOS updates a `CALayer` directly (no implicit animations). We do the same
+ * with an [ImageView]: size/sprite via layout params only when they change,
+ * position via `translationX`/`translationY`.
  *
- * Chromebook: Mac normalizes the sprite against VD points, which reads tiny
- * on 240dpi Cheets panels — enforce a density-based floor and boost.
+ * Chromebook mouse: hover→Mac→echo is a full RTT and feels laggy. While the
+ * local pointer is moving we paint immediately ([moveLocal]) and ignore Mac
+ * echo positions for a short window so the overlay stays glued to the finger
+ * / trackpad (sprite still comes from Mac `cursorImg`).
  */
 class CursorController(private val chromebook: Boolean = false) {
     @Volatile private var host: View? = null
@@ -34,10 +34,14 @@ class CursorController(private val chromebook: Boolean = false) {
     private var visible: Boolean = false
     private var laidOutW: Int = -1
     private var laidOutH: Int = -1
+    /** Uptime deadline: prefer local hover/touch position over Mac echo. */
+    @Volatile private var localDriveUntilMs: Long = 0L
 
     fun attach(host: View, cursorView: ImageView) {
         this.host = host
         this.view = cursorView
+        // Hardware layer: translation updates skip software redraws (iOS CALayer).
+        cursorView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         runOnMain { applyAll() }
     }
 
@@ -46,9 +50,31 @@ class CursorController(private val chromebook: Boolean = false) {
         view = null
         laidOutW = -1
         laidOutH = -1
+        localDriveUntilMs = 0L
+    }
+
+    /**
+     * Immediate local position from Chromebook hover/touch (UI thread).
+     * Does not wait for the Mac echo — mirrors a native OS pointer.
+     */
+    fun moveLocal(x: Float, y: Float) {
+        this.x = x
+        this.y = y
+        this.visible = true
+        localDriveUntilMs = SystemClock.uptimeMillis() + LOCAL_DRIVE_MS
+        val v = view ?: return
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            applyPosition(v)
+        } else {
+            val posted = v.handler?.postAtFrontOfQueue { applyPosition(v) } == true
+            if (!posted) v.post { applyPosition(v) }
+        }
     }
 
     fun move(x: Float, y: Float, visible: Boolean) {
+        // While local pointer is driving, Mac echo is one RTT stale — skip
+        // position so we don't tug the cursor backward every 8ms.
+        if (visible && SystemClock.uptimeMillis() < localDriveUntilMs) return
         this.x = x
         this.y = y
         this.visible = visible
@@ -56,7 +82,6 @@ class CursorController(private val chromebook: Boolean = false) {
         if (Looper.myLooper() == Looper.getMainLooper()) {
             applyPosition(v)
         } else {
-            // Front of queue so cursor beats Compose/layout work on ARC.
             val posted = v.handler?.postAtFrontOfQueue { applyPosition(v) } == true
             if (!posted) v.post { applyPosition(v) }
         }
@@ -81,6 +106,7 @@ class CursorController(private val chromebook: Boolean = false) {
 
     fun hide() {
         visible = false
+        localDriveUntilMs = 0L
         runOnMain {
             view?.visibility = View.GONE
         }
@@ -110,16 +136,25 @@ class CursorController(private val chromebook: Boolean = false) {
         val ph = host.height
         if (pw <= 0 || ph <= 0) return
         val bmp = bitmap
-        val show = visible && bmp != null && normW > 0f && normH > 0f
+        // Local hover can show before the first sprite arrives — use a
+        // density-sized placeholder arrow box so motion still feels native.
+        val show = visible && (bmp != null || chromebook) &&
+            ((normW > 0f && normH > 0f) || chromebook)
         if (!show) {
             v.visibility = View.GONE
             return
         }
-        var w = (normW * pw).toInt().coerceAtLeast(1)
-        var h = (normH * ph).toInt().coerceAtLeast(1)
-        if (chromebook) {
-            // ~32dp min long edge at the panel density; also 1.6× boost so
-            // Mac-point sprites match finger/trackpad expectations on Cheets.
+        var w: Int
+        var h: Int
+        if (normW > 0f && normH > 0f) {
+            w = (normW * pw).toInt().coerceAtLeast(1)
+            h = (normH * ph).toInt().coerceAtLeast(1)
+        } else {
+            val d = host.resources.displayMetrics.density
+            w = (24f * d).toInt().coerceAtLeast(24)
+            h = (24f * d).toInt().coerceAtLeast(24)
+        }
+        if (chromebook && normW > 0f) {
             val density = host.resources.displayMetrics.density
             val minLong = (32f * density).toInt().coerceAtLeast(48)
             val boost = 1.6f
@@ -156,5 +191,10 @@ class CursorController(private val chromebook: Boolean = false) {
         }
         if (Looper.myLooper() == Looper.getMainLooper()) block()
         else v.post(block)
+    }
+
+    companion object {
+        /** Keep local pointer authority long enough to cover one WiFi RTT. */
+        private const val LOCAL_DRIVE_MS = 100L
     }
 }

@@ -162,13 +162,18 @@ fun StreamingScreen(
             cursorController.attach(root, cursorView)
             // Chromebook trackpad/mouse: hover moves the Mac cursor without a
             // finger-down. Touch path still covers phones/tablets.
+            // Local overlay follows hover immediately (iOS-style); Mac echo is
+            // fallback only — see CursorController.moveLocal.
+            forwarder.scheduleHoverFlush = { delayMs, flush ->
+                root.postDelayed(flush, delayMs)
+            }
             video.isFocusable = true
             video.isFocusableInTouchMode = false
             video.setOnTouchListener { view, event ->
-                handleTouch(forwarder, view.width, view.height, event)
+                handleTouch(forwarder, cursorController, chromebook, view.width, view.height, event)
             }
             video.setOnHoverListener { view, event ->
-                handleHover(forwarder, view.width, view.height, event)
+                handleHover(forwarder, cursorController, view.width, view.height, event)
             }
             root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
                 cursorController.relayout()
@@ -194,9 +199,19 @@ fun decodeCursorPng(base64: String): Bitmap? {
  * two-finger scroll tracked on the average position of pointers 0 and 1,
  * matching iOS's `UIPanGestureRecognizer(minimum/maximumNumberOfTouches = 2)`.
  */
-private fun handleTouch(forwarder: InputForwarder, width: Int, height: Int, event: MotionEvent): Boolean {
+private fun handleTouch(
+    forwarder: InputForwarder,
+    cursor: CursorController,
+    chromebook: Boolean,
+    width: Int,
+    height: Int,
+    event: MotionEvent,
+): Boolean {
     when (event.actionMasked) {
-        MotionEvent.ACTION_DOWN -> forwarder.down(event.getX(0), event.getY(0), width, height)
+        MotionEvent.ACTION_DOWN -> {
+            if (chromebook) moveLocalCursor(cursor, event.getX(0), event.getY(0), width, height)
+            forwarder.down(event.getX(0), event.getY(0), width, height)
+        }
         MotionEvent.ACTION_POINTER_DOWN -> {
             if (event.pointerCount == 2) forwarder.secondPointerDown(focusX(event), focusY(event))
         }
@@ -204,6 +219,7 @@ private fun handleTouch(forwarder: InputForwarder, width: Int, height: Int, even
             if (event.pointerCount >= 2) {
                 forwarder.twoFingerMove(focusX(event), focusY(event))
             } else {
+                if (chromebook) moveLocalCursor(cursor, event.getX(0), event.getY(0), width, height)
                 forwarder.move(event.getX(0), event.getY(0), width, height)
             }
         }
@@ -216,17 +232,35 @@ private fun handleTouch(forwarder: InputForwarder, width: Int, height: Int, even
     return true
 }
 
-/** Chromebook/mouse hover → Mac `mouseMoved` (touch phase `moved` while up). */
-private fun handleHover(forwarder: InputForwarder, width: Int, height: Int, event: MotionEvent): Boolean {
+/** Chromebook/mouse hover → local overlay + Mac `mouseMoved`. */
+private fun handleHover(
+    forwarder: InputForwarder,
+    cursor: CursorController,
+    width: Int,
+    height: Int,
+    event: MotionEvent,
+): Boolean {
     when (event.actionMasked) {
         MotionEvent.ACTION_HOVER_MOVE,
         MotionEvent.ACTION_HOVER_ENTER -> {
+            moveLocalCursor(cursor, event.x, event.y, width, height)
             forwarder.hover(event.x, event.y, width, height)
             return true
         }
         MotionEvent.ACTION_HOVER_EXIT -> return true
     }
     return false
+}
+
+private fun moveLocalCursor(
+    cursor: CursorController,
+    x: Float,
+    y: Float,
+    width: Int,
+    height: Int,
+) {
+    val (nx, ny) = InputForwarder.normalize(x, y, width, height)
+    cursor.moveLocal(nx.toFloat(), ny.toFloat())
 }
 
 private fun focusX(event: MotionEvent): Float = (event.getX(0) + event.getX(1)) / 2f
