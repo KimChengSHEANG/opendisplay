@@ -64,8 +64,8 @@ enum StreamQuality: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Per-device default when nothing is saved yet. Chromebook uses Best with
-    /// a long-edge clamp in capturePlan (sharp without soft-decode lag).
+    /// Per-device default when nothing is saved yet. Chromebook uses Best —
+    /// ARC hardware VDA matches full-panel sharpness like iPhone HW decode.
     static func `default`(forDeviceKind kind: String?, global: StreamQuality) -> StreamQuality {
         if kind == "Chromebook" { return .best }
         return global
@@ -98,21 +98,25 @@ enum StreamFrameRate: Int, CaseIterable, Identifiable {
 
 /// Logical size of the virtual display relative to the receiver panel.
 /// Unlike [StreamQuality], this changes macOS desktop workspace size (points),
-/// not only encode sharpness — "More Space" packs more UI onto Chromebooks
-/// and large Android panels; "Larger Text" does the opposite.
+/// not only encode sharpness — "More Space" / "Extra Space" pack more UI onto
+/// Chromebooks and large Android panels; "Larger Text" does the opposite.
+/// Capture/encode always uses announced panel pixels, so denser presets do
+/// not inflate the H.264 stream.
 enum DisplayResolution: String, CaseIterable, Identifiable {
     case largerText
     case standard
     case moreSpace
+    case extraSpace
 
     var id: String { rawValue }
 
-    /// Multiplier applied to native HiDPI points (`panelPixels / 2`).
+    /// Multiplier applied to native HiDPI points (`panelPixels / hidpiDivisor`).
     var pointScale: Double {
         switch self {
         case .largerText: return 0.75
         case .standard: return 1.0
         case .moreSpace: return 1.25
+        case .extraSpace: return 1.5
         }
     }
 
@@ -121,6 +125,7 @@ enum DisplayResolution: String, CaseIterable, Identifiable {
         case .largerText: return "Larger Text"
         case .standard: return "Standard"
         case .moreSpace: return "More Space"
+        case .extraSpace: return "Extra Space"
         }
     }
 
@@ -129,14 +134,16 @@ enum DisplayResolution: String, CaseIterable, Identifiable {
         case .largerText: return "Fewer points — bigger UI, less desktop space."
         case .standard: return "Native HiDPI match to the device panel."
         case .moreSpace: return "More points — denser desktop; slight soft-scale on the panel."
+        case .extraSpace: return "Maximum desktop real estate — densest UI; softest on-panel scale."
         }
     }
 
     /// Sensible default when the user hasn't picked one yet.
     static func `default`(forDeviceKind kind: String?) -> DisplayResolution {
-        // Keep Chromebook at Standard — More Space inflates the encode past
-        // what ARC can decode smoothly on typical hardware.
-        .standard
+        // Chromebook / large ARC windows are laptop-class panels — More Space
+        // gives usable desktop real estate without jumping to Extra Space.
+        if kind == "Chromebook" { return .moreSpace }
+        return .standard
     }
 }
 
@@ -199,8 +206,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private let quality: StreamQuality
     private let displayResolution: DisplayResolution
     private let frameRatePreset: StreamFrameRate
-    /// Bitrate / fps applied to the live encoder (from quality + frame-rate preset;
-    /// Chromebook may still clamp long-edge size in `capturePlan`).
+    /// Bitrate / fps applied to the live encoder (from quality + frame-rate preset).
     private var encodeBitrate: Int = 18_000_000
     private var encodeFrameRate: Int = 60
     // Stable per-device serial for the virtual display, so macOS can tell
@@ -1132,14 +1138,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     continuation.resume(returning: info)
                 } else if mode == .extend, stream != nil, let previous,
                           previous.pixelsWide != info.pixelsWide
-                          || previous.pixelsHigh != info.pixelsHigh {
-                    // Phone rotated — rebuild after a short debounce so a
+                          || previous.pixelsHigh != info.pixelsHigh
+                          || previous.scale != info.scale {
+                    // Phone rotated (or its density changed, e.g. ChromeOS
+                    // display zoom) — rebuild after a short debounce so a
                     // flurry of orientation flips settles into one rebuild.
                     Task {
                         try? await Task.sleep(for: .milliseconds(300))
                         guard let current = self.lastHello,
                               current.pixelsWide == info.pixelsWide,
-                              current.pixelsHigh == info.pixelsHigh else { return }
+                              current.pixelsHigh == info.pixelsHigh,
+                              current.scale == info.scale else { return }
                         await self.reconfigure(info)
                     }
                 }

@@ -942,9 +942,6 @@ final class SenderController: ObservableObject {
     private func resolvedResolution(keys: [String], kind: String?) -> DisplayResolution {
         for key in keys {
             if let raw = resolutionByDevice[key], let value = DisplayResolution(rawValue: raw) {
-                // Old Chromebook default was More Space, which inflated encode
-                // and looked soft under the long-edge clamp — treat as Standard.
-                if kind == "Chromebook" && value == .moreSpace { return .standard }
                 return value
             }
         }
@@ -1857,6 +1854,10 @@ struct DeviceStreamSettings: View {
                     Text("Off").tag(false)
                 }
             }
+            Text(resolution.wrappedValue.explanation)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
             Text(quality.wrappedValue.explanation)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
