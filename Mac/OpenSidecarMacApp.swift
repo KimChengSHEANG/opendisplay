@@ -1510,8 +1510,18 @@ final class SenderController: ObservableObject {
     }
 
     private func end(_ session: DeviceSession) {
-        session.sender.stop()
+        // Drop callbacks first so cancel/teardown can't re-enter end() via
+        // onDisconnected / onPeerClosed while stop() is in flight.
+        session.sender.onDisconnected = nil
+        session.sender.onPeerClosed = nil
+        session.sender.onPeerSleeping = nil
+        session.sender.onHello = nil
+        session.sender.onStats = nil
+        session.sender.onStatus = nil
+        // Remove from the UI list before teardown so Disconnect feels instant;
+        // stop() itself is async (capture → encoder → virtual display).
         sessions.removeAll { $0.id == session.id }
+        session.sender.stop()
     }
 
     /// Mode/quality apply per-pipeline at construction — rebuild every session.

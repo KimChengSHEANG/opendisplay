@@ -669,6 +669,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stop() {
+        // Idempotent: Disconnect + connection-cancel callbacks can both land.
+        guard !stopped else { return }
         stopped = true
         cursorTimer?.cancel()
         cursorTimer = nil
@@ -676,19 +678,42 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         cursorImageTimer = nil
         keepAliveTimer?.cancel()
         keepAliveTimer = nil
-        stream?.stopCapture { _ in }
+
+        // Tear down off the caller's thread. Releasing CGVirtualDisplay (or
+        // invalidating VT) while SCK still has the display open hangs the
+        // main thread / WindowServer — which is exactly what Disconnect was
+        // doing when it called stop() synchronously from the UI button.
+        let streamToStop = stream
         stream = nil
+        let encoderToKill = encoder
+        encoder = nil
+        let displayToRelease = virtualDisplay
+        virtualDisplay = nil
         connection?.cancel()
         connection = nil
-        if let encoder { VTCompressionSessionInvalidate(encoder) }
-        encoder = nil
-        virtualDisplay = nil   // releasing it removes the display
+
         queue.async { [weak self] in
+            guard let self else { return }
             // Unblock a start() that is still waiting for the hello.
-            self?.helloContinuation?.resume(throwing: CancellationError())
-            self?.helloContinuation = nil
-            self?.heldLatestBuffer = nil
-            self?.heldLatestPTS = .invalid
+            self.helloContinuation?.resume(throwing: CancellationError())
+            self.helloContinuation = nil
+            self.heldLatestBuffer = nil
+            self.heldLatestPTS = .invalid
+            self.pendingSends = 0
+            self.pipelineLock.lock()
+            self.pendingEncodes = 0
+            self.pipelineLock.unlock()
+        }
+
+        Task {
+            if let streamToStop {
+                try? await streamToStop.stopCapture()
+            }
+            if let encoderToKill {
+                VTCompressionSessionInvalidate(encoderToKill)
+            }
+            // CGVirtualDisplay is main-queue-bound (see VirtualDisplay.init).
+            await MainActor.run { _ = displayToRelease }
         }
     }
 
