@@ -31,15 +31,11 @@ import com.peetzweg.opendisplay.video.VideoDecoder
 import java.util.Base64
 
 /**
- * Fullscreen video surface the Mac's stream is decoded onto, with a sibling
- * [ImageView] for the local cursor sprite.
+ * Fullscreen video surface the Mac's stream is decoded onto.
  *
- * Every device gets [SurfaceView]: ChromeOS ARC pairs it with the hardware
- * `c2.vda.avc.decoder` (full panel) — SurfaceView is the BufferQueue path VDA
- * expects. Phones and tablets get SurfaceView too, so SurfaceFlinger can
- * promote it to a hardware overlay; they keep their own hardware AVC decoder
- * via `MediaCodec.createDecoderByType`.
- * Cursor position is applied by [cursorController] directly (not Compose).
+ * Chromebook: Mac cursor sprite is installed as a [PointerIcon] on the
+ * SurfaceView (hardware cursor plane — same path as a native 60Hz monitor).
+ * Phones/tablets: sibling [ImageView] overlay driven by Mac echo / touch.
  */
 @Composable
 fun StreamingScreen(
@@ -60,26 +56,11 @@ fun StreamingScreen(
             val chromebook = ReceiverSession.deviceKind(context) == "Chromebook"
             val root = FrameLayout(context).apply {
                 setBackgroundColor(android.graphics.Color.BLACK)
-                if (chromebook && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    // Hide the ARC system pointer so only the Mac sprite shows
-                    // (otherwise two cursors, and ChromeOS's is tiny).
-                    pointerIcon = PointerIcon.getSystemIcon(
-                        context,
-                        PointerIcon.TYPE_NULL,
-                    )
-                }
             }
             val cursorView = ImageView(context).apply {
                 scaleType = ImageView.ScaleType.FIT_XY
-                // Chromebook: stay VISIBLE at alpha 0 so the first move never
-                // pays a GONE→VISIBLE layout hitch (showsCursor is off, so any
-                // hitch = invisible/choppy pointer).
-                if (chromebook) {
-                    visibility = android.view.View.VISIBLE
-                    alpha = 0f
-                } else {
-                    visibility = android.view.View.GONE
-                }
+                // Chromebook uses OS PointerIcon — keep overlay out of the tree.
+                visibility = android.view.View.GONE
                 isClickable = false
                 isFocusable = false
             }
@@ -95,10 +76,12 @@ fun StreamingScreen(
                 // Default z-order (hole-punch): the sibling ImageView draws
                 // above the surface. Media-overlay / on-top would hide the cursor.
                 surfaceView.holder.setFormat(PixelFormat.OPAQUE)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                if (chromebook && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    // Start with the system arrow; Mac `cursorImg` replaces it
+                    // via PointerIcon.create — hardware cursor plane = native feel.
                     surfaceView.pointerIcon = PointerIcon.getSystemIcon(
                         context,
-                        PointerIcon.TYPE_NULL,
+                        PointerIcon.TYPE_ARROW,
                     )
                 }
                 var started = false
@@ -174,17 +157,14 @@ fun StreamingScreen(
                 cursorView,
                 FrameLayout.LayoutParams(0, 0).apply { gravity = Gravity.TOP or Gravity.START },
             )
-            cursorController.attach(root, cursorView)
-            // Chromebook trackpad/mouse: hover moves the Mac cursor without a
-            // finger-down. Touch path still covers phones/tablets.
-            // Local overlay follows hover immediately (iOS-style); Mac echo is
-            // fallback only — see CursorController.moveLocal.
+            cursorController.attach(root, cursorView, pointerTarget = video)
+            // Chromebook trackpad/mouse: OS PointerIcon tracks at compositor
+            // rate (like a 60Hz monitor). We only forward hover to the Mac.
             video.isFocusable = true
             video.isFocusableInTouchMode = false
-            // Cap Chromebook hover→Mac at ~125Hz (latest sample only). ChromeOS
-            // batches many historical points per event; flooding TCP made Mac
-            // injection (and desktop hover UI) trail the local sprite.
-            val hoverMac = if (chromebook) HoverMacThrottle(forwarder) else null
+            // Latest-wins hover→Mac; 250Hz is enough for injection without
+            // flooding writeExecutor (position feel is native, not this path).
+            val hoverMac = if (chromebook) HoverMacThrottle(forwarder, minIntervalMs = 4L) else null
             video.setOnTouchListener { view, event ->
                 if (chromebook && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     view.requestUnbufferedDispatch(event)
@@ -329,7 +309,7 @@ private fun handleTouch(
     return true
 }
 
-/** Chromebook/mouse hover → local overlay + Mac `mouseMoved`. */
+/** Chromebook/mouse hover → Mac `mouseMoved` (OS cursor owns local drawing). */
 private fun handleHover(
     forwarder: InputForwarder,
     cursor: CursorController,
@@ -344,8 +324,10 @@ private fun handleHover(
             val samples = pointerSamples(event, pointerIndex = 0)
             if (samples.isEmpty()) return true
             val last = samples.last()
-            // Every sample paints locally; Mac only needs the tip of the path.
-            moveLocalCursor(cursor, last.first, last.second, width, height)
+            // Software overlay only when not on the native pointer plane.
+            if (!cursor.usesNativePointer) {
+                moveLocalCursor(cursor, last.first, last.second, width, height)
+            }
             if (hoverMac != null) {
                 hoverMac.onHover(last.first, last.second, width, height)
             } else {
