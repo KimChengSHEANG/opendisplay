@@ -652,9 +652,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         default: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         }
         // Shallow queue: depth 8 buffered ~8 stale frames on idle→wake bursts
-        // (first encoded frame was the oldest). 3 covers keyframe-replay hold +
-        // one in-flight encode without multi-frame lag.
-        config.queueDepth = 3
+        // (first encoded frame was the oldest). 2 = in-flight encode + one hold
+        // without multi-frame lag on Chromebook first-move.
+        config.queueDepth = 2
         config.showsCursor = !localCursor
 
         encodeFrameRate = frameRate
@@ -1261,7 +1261,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // another frame after idle, and the first burst used to encode
                 // a stale queued buffer. Kick the last frame now so the next
                 // real capture rides a warm encoder.
-                if Date().timeIntervalSince(lastCaptureAt) > 0.08 {
+                if Date().timeIntervalSince(lastCaptureAt) > 0.05 {
                     encodeHeldOrKeepAlive(forceKeepAlive: true)
                 }
                 if let t = obj["t"] as? Double {
@@ -1275,7 +1275,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         case "scroll":
             if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
                 inputInjector?.handleScroll(dx: dx, dy: dy)
-                if Date().timeIntervalSince(lastCaptureAt) > 0.08 {
+                if Date().timeIntervalSince(lastCaptureAt) > 0.05 {
                     encodeHeldOrKeepAlive(forceKeepAlive: true)
                 }
             }
@@ -1460,12 +1460,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func startKeepAlive() {
         keepAliveTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        // ~10 Hz is enough to keep VT + the Chromebook decoder warm without
-        // noticeable idle bandwidth (static P-frames compress to almost nothing).
-        timer.schedule(deadline: .now() + 0.1, repeating: .milliseconds(100))
+        // Chromebook / local-cursor sessions: keep VT+VDA warm at ~30Hz so the
+        // first trackpad move doesn't pay an idle→wake encode backlog. Static
+        // P-frames compress to almost nothing. Phones stay at 10Hz.
+        let chromebook = lastHello?.device == "Chromebook"
+        let intervalMs = (chromebook || localCursor) ? 33 : 100
+        timer.schedule(deadline: .now() + .milliseconds(intervalMs),
+                       repeating: .milliseconds(intervalMs))
         timer.setEventHandler { [weak self] in self?.encodeHeldOrKeepAlive(forceKeepAlive: false) }
         timer.resume()
         keepAliveTimer = timer
+        Log.info("keep-alive \(intervalMs)ms chromebook=\(chromebook) localCursor=\(localCursor)")
     }
 
     /// Prefer a held latest capture; otherwise re-encode the last static frame
@@ -1483,9 +1488,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard !busy else { return }
         let quiet = Date().timeIntervalSince(lastCaptureAt) > 0.09
         guard forceKeepAlive || quiet, let buffer = lastPixelBuffer else { return }
-        // Input can arrive at >100 Hz; don't re-encode the same static frame
-        // on every hover sample — once per ~50ms is enough to warm the path.
-        if Date().timeIntervalSince(lastKeepAliveAt) < 0.05 { return }
+        // Input wake bypasses the idle throttle so the first hover sample
+        // immediately refreshes the panel instead of waiting on the timer.
+        let minGap = forceKeepAlive ? 0.012 : 0.03
+        if Date().timeIntervalSince(lastKeepAliveAt) < minGap { return }
         lastKeepAliveAt = Date()
         encode(buffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
     }

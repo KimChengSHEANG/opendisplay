@@ -71,7 +71,15 @@ fun StreamingScreen(
             }
             val cursorView = ImageView(context).apply {
                 scaleType = ImageView.ScaleType.FIT_XY
-                visibility = android.view.View.GONE
+                // Chromebook: stay VISIBLE at alpha 0 so the first move never
+                // pays a GONE→VISIBLE layout hitch (showsCursor is off, so any
+                // hitch = invisible/choppy pointer).
+                if (chromebook) {
+                    visibility = android.view.View.VISIBLE
+                    alpha = 0f
+                } else {
+                    visibility = android.view.View.GONE
+                }
                 isClickable = false
                 isFocusable = false
             }

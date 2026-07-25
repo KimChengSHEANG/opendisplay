@@ -19,6 +19,10 @@ import android.widget.ImageView
  * local pointer is moving we paint immediately ([moveLocal]) — with a short
  * velocity lead so the sprite stays ahead of the trackpad sample — and ignore
  * Mac echo positions for a window long enough to cover USB/WiFi RTT.
+ *
+ * Chromebook also keeps the view attached (alpha 0 when idle) so the first
+ * move never pays a GONE→VISIBLE + layout hitch — that hitch was the main
+ * "choppy when it first starts moving" feel with `showsCursor=false`.
  */
 class CursorController(private val chromebook: Boolean = false) {
     @Volatile private var host: View? = null
@@ -38,6 +42,7 @@ class CursorController(private val chromebook: Boolean = false) {
     @Volatile private var localDriveUntilMs: Long = 0L
     private var lastLocalX: Float = Float.NaN
     private var lastLocalY: Float = Float.NaN
+    private var lastLocalAtMs: Long = 0L
 
     fun attach(host: View, cursorView: ImageView) {
         this.host = host
@@ -46,8 +51,16 @@ class CursorController(private val chromebook: Boolean = false) {
             // Hardware-compose the sprite so it isn't stuck behind SurfaceView
             // hole-punch / software blending (a common ARC mouse-feel killer).
             cursorView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+            cursorView.alpha = 0f
+            // Stay in the tree so the first move only updates translation.
+            cursorView.visibility = View.VISIBLE
         }
-        runOnMain { applyAll() }
+        runOnMain {
+            // Pre-size with the placeholder so moveLocal never triggers a
+            // layout pass on the first trackpad sample.
+            if (chromebook) ensureLaidOut(cursorView)
+            applyAll()
+        }
     }
 
     fun detach() {
@@ -58,6 +71,7 @@ class CursorController(private val chromebook: Boolean = false) {
         localDriveUntilMs = 0L
         lastLocalX = Float.NaN
         lastLocalY = Float.NaN
+        lastLocalAtMs = 0L
     }
 
     /**
@@ -65,20 +79,23 @@ class CursorController(private val chromebook: Boolean = false) {
      * Does not wait for the Mac echo — mirrors a native OS pointer.
      */
     fun moveLocal(x: Float, y: Float) {
+        val now = SystemClock.uptimeMillis()
         var drawX = x
         var drawY = y
-        if (!lastLocalX.isNaN() && !lastLocalY.isNaN()) {
+        if (!lastLocalX.isNaN() && !lastLocalY.isNaN() && now - lastLocalAtMs < 80) {
             // Lead the sprite by a fraction of the last delta (~½ frame) so
             // ARC's input→draw path feels closer to a native 60/120Hz pointer.
+            // Skip prediction after a pause — leading a cold start overshoots.
             drawX = (x + (x - lastLocalX) * LOCAL_PREDICT).coerceIn(0f, 1f)
             drawY = (y + (y - lastLocalY) * LOCAL_PREDICT).coerceIn(0f, 1f)
         }
         lastLocalX = x
         lastLocalY = y
+        lastLocalAtMs = now
         this.x = drawX
         this.y = drawY
         this.visible = true
-        localDriveUntilMs = SystemClock.uptimeMillis() + LOCAL_DRIVE_MS
+        localDriveUntilMs = now + LOCAL_DRIVE_MS
         val v = view ?: return
         if (Looper.myLooper() == Looper.getMainLooper()) {
             applyPosition(v)
@@ -126,8 +143,15 @@ class CursorController(private val chromebook: Boolean = false) {
         localDriveUntilMs = 0L
         lastLocalX = Float.NaN
         lastLocalY = Float.NaN
+        lastLocalAtMs = 0L
         runOnMain {
-            view?.visibility = View.GONE
+            val v = view ?: return@runOnMain
+            if (chromebook) {
+                v.alpha = 0f
+                v.visibility = View.VISIBLE
+            } else {
+                v.visibility = View.GONE
+            }
         }
     }
 
@@ -136,6 +160,7 @@ class CursorController(private val chromebook: Boolean = false) {
         localDriveUntilMs = SystemClock.uptimeMillis() + LOCAL_HANDOFF_MS
         lastLocalX = Float.NaN
         lastLocalY = Float.NaN
+        lastLocalAtMs = 0L
     }
 
     /** Host size changed (rotation / window resize) — recompute pixel size + translation. */
@@ -164,12 +189,39 @@ class CursorController(private val chromebook: Boolean = false) {
         val bmp = bitmap
         // Local hover can show before the first sprite arrives — use a
         // density-sized placeholder arrow box so motion still feels native.
-        val show = visible && (bmp != null || chromebook) &&
+        val canShow = (bmp != null || chromebook) &&
             ((normW > 0f && normH > 0f) || chromebook)
-        if (!show) {
-            v.visibility = View.GONE
+        if (!canShow) {
+            if (chromebook) {
+                v.alpha = 0f
+                v.visibility = View.VISIBLE
+            } else {
+                v.visibility = View.GONE
+            }
             return
         }
+        ensureLaidOut(v)
+        val w = laidOutW
+        val h = laidOutH
+        if (w <= 0 || h <= 0) return
+        v.translationX = x * pw - anchorX * w
+        v.translationY = y * ph - anchorY * h
+        if (chromebook) {
+            v.visibility = View.VISIBLE
+            val target = if (visible) 1f else 0f
+            if (v.alpha != target) v.alpha = target
+        } else {
+            v.visibility = if (visible) View.VISIBLE else View.GONE
+            v.alpha = 1f
+        }
+    }
+
+    /** Size the ImageView once; subsequent moves only touch translation/alpha. */
+    private fun ensureLaidOut(v: ImageView) {
+        val host = host ?: return
+        val pw = host.width
+        val ph = host.height
+        if (pw <= 0 || ph <= 0) return
         var w: Int
         var h: Int
         if (normW > 0f && normH > 0f) {
@@ -192,21 +244,17 @@ class CursorController(private val chromebook: Boolean = false) {
                 h = (h * s).toInt().coerceAtLeast(1)
             }
         }
-        if (w != laidOutW || h != laidOutH) {
-            val lp = (v.layoutParams as FrameLayout.LayoutParams).apply {
-                width = w
-                height = h
-                leftMargin = 0
-                topMargin = 0
-                gravity = Gravity.TOP or Gravity.START
-            }
-            v.layoutParams = lp
-            laidOutW = w
-            laidOutH = h
+        if (w == laidOutW && h == laidOutH) return
+        val lp = (v.layoutParams as FrameLayout.LayoutParams).apply {
+            width = w
+            height = h
+            leftMargin = 0
+            topMargin = 0
+            gravity = Gravity.TOP or Gravity.START
         }
-        v.translationX = x * pw - anchorX * w
-        v.translationY = y * ph - anchorY * h
-        if (v.visibility != View.VISIBLE) v.visibility = View.VISIBLE
+        v.layoutParams = lp
+        laidOutW = w
+        laidOutH = h
     }
 
     private fun runOnMain(block: () -> Unit) {
@@ -221,10 +269,10 @@ class CursorController(private val chromebook: Boolean = false) {
 
     companion object {
         /** Cover a typical USB/WiFi RTT so Mac echo can't tug the sprite back. */
-        private const val LOCAL_DRIVE_MS = 220L
+        private const val LOCAL_DRIVE_MS = 280L
         /** After hover exit, brief grace before Mac echo can tug position. */
         private const val LOCAL_HANDOFF_MS = 40L
         /** Fraction of last delta to lead the local sprite (iOS predictedTouches). */
-        private const val LOCAL_PREDICT = 0.45f
+        private const val LOCAL_PREDICT = 0.5f
     }
 }
