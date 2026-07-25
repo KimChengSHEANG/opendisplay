@@ -16,9 +16,9 @@ import android.widget.ImageView
  * position via `translationX`/`translationY`.
  *
  * Chromebook mouse: hover→Mac→echo is a full RTT and feels laggy. While the
- * local pointer is moving we paint immediately ([moveLocal]) and ignore Mac
- * echo positions for a short window so the overlay stays glued to the finger
- * / trackpad (sprite still comes from Mac `cursorImg`).
+ * local pointer is moving we paint immediately ([moveLocal]) — with a short
+ * velocity lead so the sprite stays ahead of the trackpad sample — and ignore
+ * Mac echo positions for a window long enough to cover USB/WiFi RTT.
  */
 class CursorController(private val chromebook: Boolean = false) {
     @Volatile private var host: View? = null
@@ -36,10 +36,17 @@ class CursorController(private val chromebook: Boolean = false) {
     private var laidOutH: Int = -1
     /** Uptime deadline: prefer local hover/touch position over Mac echo. */
     @Volatile private var localDriveUntilMs: Long = 0L
+    private var lastLocalX: Float = Float.NaN
+    private var lastLocalY: Float = Float.NaN
 
     fun attach(host: View, cursorView: ImageView) {
         this.host = host
         this.view = cursorView
+        if (chromebook) {
+            // Hardware-compose the sprite so it isn't stuck behind SurfaceView
+            // hole-punch / software blending (a common ARC mouse-feel killer).
+            cursorView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        }
         runOnMain { applyAll() }
     }
 
@@ -49,6 +56,8 @@ class CursorController(private val chromebook: Boolean = false) {
         laidOutW = -1
         laidOutH = -1
         localDriveUntilMs = 0L
+        lastLocalX = Float.NaN
+        lastLocalY = Float.NaN
     }
 
     /**
@@ -56,8 +65,18 @@ class CursorController(private val chromebook: Boolean = false) {
      * Does not wait for the Mac echo — mirrors a native OS pointer.
      */
     fun moveLocal(x: Float, y: Float) {
-        this.x = x
-        this.y = y
+        var drawX = x
+        var drawY = y
+        if (!lastLocalX.isNaN() && !lastLocalY.isNaN()) {
+            // Lead the sprite by a fraction of the last delta (~½ frame) so
+            // ARC's input→draw path feels closer to a native 60/120Hz pointer.
+            drawX = (x + (x - lastLocalX) * LOCAL_PREDICT).coerceIn(0f, 1f)
+            drawY = (y + (y - lastLocalY) * LOCAL_PREDICT).coerceIn(0f, 1f)
+        }
+        lastLocalX = x
+        lastLocalY = y
+        this.x = drawX
+        this.y = drawY
         this.visible = true
         localDriveUntilMs = SystemClock.uptimeMillis() + LOCAL_DRIVE_MS
         val v = view ?: return
@@ -105,6 +124,8 @@ class CursorController(private val chromebook: Boolean = false) {
     fun hide() {
         visible = false
         localDriveUntilMs = 0L
+        lastLocalX = Float.NaN
+        lastLocalY = Float.NaN
         runOnMain {
             view?.visibility = View.GONE
         }
@@ -113,6 +134,8 @@ class CursorController(private val chromebook: Boolean = false) {
     /** Hover left the surface — let Mac echo resume after a short grace. */
     fun endLocalDrive() {
         localDriveUntilMs = SystemClock.uptimeMillis() + LOCAL_HANDOFF_MS
+        lastLocalX = Float.NaN
+        lastLocalY = Float.NaN
     }
 
     /** Host size changed (rotation / window resize) — recompute pixel size + translation. */
@@ -197,9 +220,11 @@ class CursorController(private val chromebook: Boolean = false) {
     }
 
     companion object {
-        /** Keep local pointer authority long enough to cover one WiFi RTT. */
-        private const val LOCAL_DRIVE_MS = 120L
+        /** Cover a typical USB/WiFi RTT so Mac echo can't tug the sprite back. */
+        private const val LOCAL_DRIVE_MS = 220L
         /** After hover exit, brief grace before Mac echo can tug position. */
         private const val LOCAL_HANDOFF_MS = 40L
+        /** Fraction of last delta to lead the local sprite (iOS predictedTouches). */
+        private const val LOCAL_PREDICT = 0.45f
     }
 }

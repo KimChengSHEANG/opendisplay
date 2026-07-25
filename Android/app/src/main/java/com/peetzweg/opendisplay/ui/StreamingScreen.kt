@@ -6,6 +6,7 @@ import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
@@ -172,11 +173,24 @@ fun StreamingScreen(
             // fallback only — see CursorController.moveLocal.
             video.isFocusable = true
             video.isFocusableInTouchMode = false
+            // Cap Chromebook hover→Mac at ~125Hz (latest sample only). ChromeOS
+            // batches many historical points per event; flooding TCP made Mac
+            // injection (and desktop hover UI) trail the local sprite.
+            val hoverMac = if (chromebook) HoverMacThrottle(forwarder) else null
             video.setOnTouchListener { view, event ->
+                if (chromebook && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    view.requestUnbufferedDispatch(event)
+                }
                 handleTouch(forwarder, cursorController, chromebook, view.width, view.height, event)
             }
             video.setOnHoverListener { view, event ->
-                handleHover(forwarder, cursorController, view.width, view.height, event)
+                if (chromebook && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    view.requestUnbufferedDispatch(event)
+                }
+                handleHover(
+                    forwarder, cursorController, hoverMac,
+                    view.width, view.height, event,
+                )
             }
             // Mouse wheel / precision scroll (Chromebook) → Mac scroll.
             video.setOnGenericMotionListener { view, event ->
@@ -311,6 +325,7 @@ private fun handleTouch(
 private fun handleHover(
     forwarder: InputForwarder,
     cursor: CursorController,
+    hoverMac: HoverMacThrottle?,
     width: Int,
     height: Int,
     event: MotionEvent,
@@ -319,19 +334,83 @@ private fun handleHover(
         MotionEvent.ACTION_HOVER_MOVE,
         MotionEvent.ACTION_HOVER_ENTER -> {
             val samples = pointerSamples(event, pointerIndex = 0)
-            if (samples.isNotEmpty()) {
-                val last = samples.last()
-                moveLocalCursor(cursor, last.first, last.second, width, height)
+            if (samples.isEmpty()) return true
+            val last = samples.last()
+            // Every sample paints locally; Mac only needs the tip of the path.
+            moveLocalCursor(cursor, last.first, last.second, width, height)
+            if (hoverMac != null) {
+                hoverMac.onHover(last.first, last.second, width, height)
+            } else {
+                forwarder.movedSamples(samples, width, height)
             }
-            forwarder.movedSamples(samples, width, height)
             return true
         }
         MotionEvent.ACTION_HOVER_EXIT -> {
+            hoverMac?.flush()
             cursor.endLocalDrive()
             return true
         }
     }
     return false
+}
+
+/**
+ * Latest-wins hover→Mac throttle. Local cursor stays full-rate; the wire is
+ * capped so ChromeOS history bursts can't backlog `writeExecutor`.
+ */
+private class HoverMacThrottle(
+    private val forwarder: InputForwarder,
+    private val minIntervalMs: Long = 8L,
+) {
+    private var lastSendMs = 0L
+    private var pendingX = Float.NaN
+    private var pendingY = Float.NaN
+    private var pendingW = 0
+    private var pendingH = 0
+    private var flushScheduled = false
+    private val handler = Handler(Looper.getMainLooper())
+    private val flushRunnable = Runnable {
+        flushScheduled = false
+        flush()
+    }
+
+    fun onHover(x: Float, y: Float, width: Int, height: Int) {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastSendMs >= minIntervalMs) {
+            lastSendMs = now
+            pendingX = Float.NaN
+            if (flushScheduled) {
+                handler.removeCallbacks(flushRunnable)
+                flushScheduled = false
+            }
+            forwarder.movedSamples(listOf(x to y), width, height)
+            return
+        }
+        pendingX = x
+        pendingY = y
+        pendingW = width
+        pendingH = height
+        if (!flushScheduled) {
+            flushScheduled = true
+            val delay = (minIntervalMs - (now - lastSendMs)).coerceAtLeast(1L)
+            handler.postDelayed(flushRunnable, delay)
+        }
+    }
+
+    fun flush() {
+        if (flushScheduled) {
+            handler.removeCallbacks(flushRunnable)
+            flushScheduled = false
+        }
+        if (pendingX.isNaN()) return
+        val x = pendingX
+        val y = pendingY
+        val w = pendingW
+        val h = pendingH
+        pendingX = Float.NaN
+        lastSendMs = SystemClock.uptimeMillis()
+        forwarder.movedSamples(listOf(x to y), w, h)
+    }
 }
 
 /** Mouse wheel → Mac pixel scroll (same wire as two-finger pan). */
