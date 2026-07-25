@@ -194,7 +194,7 @@ final class SenderController: ObservableObject {
     @Published var port = UserDefaults.standard.string(forKey: "port") ?? "9000"
     // `-mode mirror` / `-mode extend` launch argument also works.
     @Published var mode = CaptureMode(rawValue: UserDefaults.standard.string(forKey: "mode") ?? "") ?? .extend
-    @Published var quality = StreamQuality(rawValue: UserDefaults.standard.string(forKey: "quality") ?? "") ?? .best {
+    @Published var quality = StreamQuality.parse(UserDefaults.standard.string(forKey: "quality") ?? "") ?? .best {
         didSet { UserDefaults.standard.set(quality.rawValue, forKey: "quality") }
     }
     /// Per-device virtual-display size ("Larger Text" / "Standard" / "More Space"),
@@ -971,9 +971,7 @@ final class SenderController: ObservableObject {
 
     private func resolvedQuality(keys: [String], kind: String?) -> StreamQuality {
         for key in keys {
-            if let raw = qualityByDevice[key], let value = StreamQuality(rawValue: raw) {
-                // Soft on Chromebook is unreadably soft; bump to Balanced.
-                if kind == "Chromebook" && value == .fast { return .balanced }
+            if let raw = qualityByDevice[key], let value = StreamQuality.parse(raw) {
                 return value
             }
         }

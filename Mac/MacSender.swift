@@ -26,65 +26,73 @@ enum CaptureMode: String {
 
 /// Capture-resolution / bitrate trade-off — exposed in the UI as **Sharpness**.
 /// The virtual display always runs at native size; only the captured/encoded
-/// stream is scaled, so lower presets cut encode, transmit, and decode time
-/// at the cost of sharpness.
+/// stream is scaled, so lower percents cut encode, transmit, and decode time
+/// at the cost of sharpness. Values above 100% supersample the framebuffer
+/// (SCK upscales before encode) for sharper text after the receiver scales
+/// down. Raw values are percent strings (`"200"`…`"40"`); legacy `best` /
+/// `balanced` / `fast` still parse via [`parse`].
 enum StreamQuality: String, CaseIterable, Identifiable {
-    case best, balanced, fast
+    case p200 = "200"
+    case p175 = "175"
+    case p150 = "150"
+    case p125 = "125"
+    case p100 = "100"
+    case p90 = "90"
+    case p80 = "80"
+    case p70 = "70"
+    case p60 = "60"
+    case p50 = "50"
+    case p40 = "40"
+
+    /// Default / full-panel capture (not the absolute max — see p125+).
+    static let best = Self.p100
 
     var id: String { rawValue }
 
-    var scale: Double {
-        switch self {
-        case .best: return 1.0
-        case .balanced: return 0.75
-        case .fast: return 0.5
-        }
-    }
+    /// Capture scale relative to the virtual-display framebuffer (1.0 = full).
+    var scale: Double { Double(Int(rawValue) ?? 100) / 100.0 }
 
-    var bitrate: Int {
-        switch self {
-        case .best: return 18_000_000
-        case .balanced: return 10_000_000
-        case .fast: return 6_000_000
-        }
-    }
+    /// Phone-tier base bitrate at 100%; [`capturePlan`] then scales by pixel area.
+    var bitrate: Int { 18_000_000 }
 
     /// Chromebook panels are laptop-class (often 2400×1600); phone-tier bitrates
     /// crush desktop text. Use a higher floor when encoding for Cheets.
     func bitrate(forDeviceKind kind: String?) -> Int {
-        if kind == "Chromebook" {
-            switch self {
-            case .best: return 36_000_000
-            case .balanced: return 20_000_000
-            case .fast: return 12_000_000
-            }
-        }
-        return bitrate
+        kind == "Chromebook" ? 36_000_000 : bitrate
     }
 
-    var label: String {
-        switch self {
-        case .best: return "Sharp"
-        case .balanced: return "Balanced"
-        case .fast: return "Soft"
-        }
-    }
+    var label: String { "\(rawValue)%" }
 
     var explanation: String {
         switch self {
-        case .best:
-            return "Full panel resolution and highest bitrate — sharpest text and UI."
-        case .balanced:
-            return "75% capture resolution — good sharpness with lower bandwidth and latency."
-        case .fast:
-            return "Half resolution — softest picture, lowest bandwidth. Best on weak WiFi."
+        case .p200:
+            return "200% supersampled capture — sharpest text, highest bandwidth."
+        case .p175, .p150, .p125:
+            return "\(rawValue)% supersampled capture — sharper than full panel, higher bandwidth."
+        case .p100:
+            return "Full panel resolution — 1:1 with the framebuffer."
+        case .p40:
+            return "40% capture resolution — softest picture, lowest bandwidth."
+        default:
+            return "\(rawValue)% capture resolution — lower uses less bandwidth and encode time."
         }
     }
 
-    /// Per-device default when nothing is saved yet. Chromebook uses Best —
+    /// Accept current percent raw values plus legacy Sharp/Balanced/Soft keys.
+    static func parse(_ raw: String) -> StreamQuality? {
+        if let value = StreamQuality(rawValue: raw) { return value }
+        switch raw {
+        case "best": return .p100
+        case "balanced": return .p70
+        case "fast": return .p50
+        default: return nil
+        }
+    }
+
+    /// Per-device default when nothing is saved yet. Chromebook uses 100% —
     /// ARC hardware VDA matches full-panel sharpness like iPhone HW decode.
     static func `default`(forDeviceKind kind: String?, global: StreamQuality) -> StreamQuality {
-        if kind == "Chromebook" { return .best }
+        if kind == "Chromebook" { return .p100 }
         return global
     }
 }
