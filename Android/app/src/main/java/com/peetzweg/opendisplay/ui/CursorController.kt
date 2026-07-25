@@ -1,30 +1,27 @@
 package com.peetzweg.opendisplay.ui
 
 import android.graphics.Bitmap
-import android.os.Build
 import android.os.Looper
 import android.os.SystemClock
-import android.util.Log
 import android.view.Gravity
-import android.view.PointerIcon
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
 
 /**
- * Local Mac cursor.
+ * Local Mac cursor overlay that bypasses Compose.
  *
- * **Phones:** [ImageView] overlay from Mac echo / touch.
+ * iOS updates a `CALayer` directly. We do the same with an [ImageView].
  *
- * **Chromebook:** prefer the OS cursor plane via [PointerIcon] on a normal
- * (non-SurfaceView) hit layer — that matches a 60Hz monitor's pointer feel.
- * SurfaceView itself cannot host a visible PointerIcon on ARC. Software
- * [ImageView] remains as fallback if the native icon cannot be installed.
+ * Chromebook: always use the software overlay. ARC does not reliably draw
+ * [android.view.PointerIcon] (on SurfaceView or a sibling hit layer), which
+ * left the pointer invisible. Hover paints immediately via [moveLocal]; Mac
+ * echo is ignored while driving locally. The view stays attached at alpha 0
+ * so the first move never pays a GONE→VISIBLE hitch.
  */
 class CursorController(private val chromebook: Boolean = false) {
     @Volatile private var host: View? = null
     @Volatile private var view: ImageView? = null
-    @Volatile private var pointerTarget: View? = null
 
     private var bitmap: Bitmap? = null
     private var normW: Float = 0f
@@ -40,60 +37,45 @@ class CursorController(private val chromebook: Boolean = false) {
     private var lastLocalX: Float = Float.NaN
     private var lastLocalY: Float = Float.NaN
     private var lastLocalAtMs: Long = 0L
-    private var pointerIconBitmap: Bitmap? = null
-    /** True once a PointerIcon is live on [pointerTarget] (native speed path). */
-    @Volatile private var nativePointerLive: Boolean = false
 
-    val usesNativePointer: Boolean get() = chromebook && nativePointerLive
+    /** ARC PointerIcon is unreliable — always false. */
+    val usesNativePointer: Boolean get() = false
 
     fun attach(host: View, cursorView: ImageView, pointerTarget: View? = null) {
         this.host = host
         this.view = cursorView
-        this.pointerTarget = pointerTarget
         if (chromebook) {
             cursorView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-            // Try native pointer first — overlay stays ready as fallback.
             cursorView.alpha = 0f
             cursorView.visibility = View.VISIBLE
-            runOnMain {
+        }
+        runOnMain {
+            if (chromebook) {
                 ensureLaidOut(cursorView)
-                if (!installNativePointer(preferCustom = false)) {
-                    // Keep overlay path armed with placeholder.
-                    applyAll()
+                if (cursorView.drawable == null) {
+                    cursorView.setImageDrawable(placeholderArrow(cursorView))
                 }
             }
-        } else {
-            runOnMain { applyAll() }
+            applyAll()
         }
     }
 
     fun detach() {
         host = null
         view = null
-        pointerTarget = null
         laidOutW = -1
         laidOutH = -1
         localDriveUntilMs = 0L
         lastLocalX = Float.NaN
         lastLocalY = Float.NaN
         lastLocalAtMs = 0L
-        nativePointerLive = false
-        pointerIconBitmap?.takeIf { it !== bitmap }?.recycle()
-        pointerIconBitmap = null
     }
 
     fun moveLocal(x: Float, y: Float) {
-        // Native OS cursor already sits on the sample — nothing to paint.
-        if (usesNativePointer) {
-            localDriveUntilMs = SystemClock.uptimeMillis() + LOCAL_DRIVE_MS
-            return
-        }
         val now = SystemClock.uptimeMillis()
         var drawX = x
         var drawY = y
         if (!lastLocalX.isNaN() && !lastLocalY.isNaN() && now - lastLocalAtMs < 50) {
-            // Lead harder than a half-frame so the sprite matches monitor feel;
-            // capped so sparse samples after a pause don't overshoot.
             val dt = (now - lastLocalAtMs).toFloat().coerceIn(4f, 24f)
             val lead = LOCAL_PREDICT * (16f / dt)
             drawX = (x + (x - lastLocalX) * lead).coerceIn(0f, 1f)
@@ -116,7 +98,6 @@ class CursorController(private val chromebook: Boolean = false) {
     }
 
     fun move(x: Float, y: Float, visible: Boolean) {
-        if (usesNativePointer) return
         if (visible && SystemClock.uptimeMillis() < localDriveUntilMs) return
         this.x = x
         this.y = y
@@ -144,14 +125,7 @@ class CursorController(private val chromebook: Boolean = false) {
         this.anchorY = anchorY
         laidOutW = -1
         laidOutH = -1
-        runOnMain {
-            if (chromebook && installNativePointer(preferCustom = true)) {
-                hideOverlay()
-            } else {
-                nativePointerLive = false
-                applyAll()
-            }
-        }
+        runOnMain { applyAll() }
     }
 
     fun hide() {
@@ -161,16 +135,12 @@ class CursorController(private val chromebook: Boolean = false) {
         lastLocalY = Float.NaN
         lastLocalAtMs = 0L
         runOnMain {
-            if (usesNativePointer) {
-                installNativePointer(preferCustom = false)
+            val v = view ?: return@runOnMain
+            if (chromebook) {
+                v.alpha = 0f
+                v.visibility = View.VISIBLE
             } else {
-                val v = view ?: return@runOnMain
-                if (chromebook) {
-                    v.alpha = 0f
-                    v.visibility = View.VISIBLE
-                } else {
-                    v.visibility = View.GONE
-                }
+                v.visibility = View.GONE
             }
         }
     }
@@ -185,78 +155,7 @@ class CursorController(private val chromebook: Boolean = false) {
     fun relayout() {
         laidOutW = -1
         laidOutH = -1
-        runOnMain {
-            if (chromebook && installNativePointer(preferCustom = bitmap != null)) {
-                hideOverlay()
-            } else {
-                applyAll()
-            }
-        }
-    }
-
-    /**
-     * Install a PointerIcon on the non-SurfaceView hit layer.
-     * @return true if a visible native icon is now active
-     */
-    private fun installNativePointer(preferCustom: Boolean): Boolean {
-        if (!chromebook || Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
-        val target = pointerTarget ?: return false
-        val ctx = target.context
-        val icon: PointerIcon = if (preferCustom) {
-            customPointerIcon() ?: PointerIcon.getSystemIcon(ctx, PointerIcon.TYPE_ARROW)
-        } else {
-            PointerIcon.getSystemIcon(ctx, PointerIcon.TYPE_ARROW)
-        }
-        target.pointerIcon = icon
-        host?.pointerIcon = icon
-        nativePointerLive = true
-        Log.i(TAG, "native PointerIcon active custom=${preferCustom && bitmap != null}")
-        return true
-    }
-
-    private fun customPointerIcon(): PointerIcon? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return null
-        val host = host ?: return null
-        val bmp = bitmap ?: return null
-        if (bmp.isRecycled || host.width <= 0 || host.height <= 0) return null
-        if (normW <= 0f || normH <= 0f) return null
-        var w = (normW * host.width * CURSOR_BOOST).toInt().coerceAtLeast(1)
-        var h = (normH * host.height * CURSOR_BOOST).toInt().coerceAtLeast(1)
-        val density = host.resources.displayMetrics.density
-        val minLong = (28f * density).toInt().coerceAtLeast(32)
-        val maxLong = (88f * density).toInt().coerceAtLeast(96)
-        if (maxOf(w, h) < minLong) {
-            val s = minLong.toFloat() / maxOf(w, h).toFloat()
-            w = (w * s).toInt().coerceAtLeast(1)
-            h = (h * s).toInt().coerceAtLeast(1)
-        }
-        if (maxOf(w, h) > maxLong) {
-            val s = maxLong.toFloat() / maxOf(w, h).toFloat()
-            w = (w * s).toInt().coerceAtLeast(1)
-            h = (h * s).toInt().coerceAtLeast(1)
-        }
-        val scaled = try {
-            Bitmap.createScaledBitmap(bmp, w, h, true)
-        } catch (_: Exception) {
-            return null
-        }
-        pointerIconBitmap?.takeIf { it !== bmp && it !== scaled }?.recycle()
-        pointerIconBitmap = scaled
-        val hotX = (anchorX * w).coerceIn(0f, (w - 1).toFloat())
-        val hotY = (anchorY * h).coerceIn(0f, (h - 1).toFloat())
-        return try {
-            PointerIcon.create(scaled, hotX, hotY)
-        } catch (e: Exception) {
-            Log.w(TAG, "PointerIcon.create failed: ${e.message}")
-            null
-        }
-    }
-
-    private fun hideOverlay() {
-        view?.let {
-            it.alpha = 0f
-            it.visibility = View.GONE
-        }
+        runOnMain { applyAll() }
     }
 
     private fun applyAll() {
@@ -273,7 +172,7 @@ class CursorController(private val chromebook: Boolean = false) {
     }
 
     private fun placeholderArrow(v: ImageView): android.graphics.drawable.Drawable {
-        val d = (24f * v.resources.displayMetrics.density).toInt().coerceAtLeast(24)
+        val d = (28f * v.resources.displayMetrics.density).toInt().coerceAtLeast(28)
         val bmp = Bitmap.createBitmap(d, d, Bitmap.Config.ARGB_8888)
         val c = android.graphics.Canvas(bmp)
         val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
@@ -307,10 +206,6 @@ class CursorController(private val chromebook: Boolean = false) {
     }
 
     private fun applyPosition(v: ImageView) {
-        if (usesNativePointer) {
-            hideOverlay()
-            return
-        }
         val host = host ?: return
         val pw = host.width
         val ph = host.height
@@ -330,8 +225,11 @@ class CursorController(private val chromebook: Boolean = false) {
         val w = laidOutW
         val h = laidOutH
         if (w <= 0 || h <= 0) return
-        v.translationX = x * pw - anchorX * w
-        v.translationY = y * ph - anchorY * h
+        // Placeholder has top-left hotspot; Mac sprites use anchorX/Y.
+        val ax = if (bitmap != null) anchorX else 0.15f
+        val ay = if (bitmap != null) anchorY else 0.10f
+        v.translationX = x * pw - ax * w
+        v.translationY = y * ph - ay * h
         if (chromebook) {
             v.visibility = View.VISIBLE
             val target = if (visible) 1f else 0f
@@ -354,8 +252,8 @@ class CursorController(private val chromebook: Boolean = false) {
             h = (normH * ph).toInt().coerceAtLeast(1)
         } else {
             val d = host.resources.displayMetrics.density
-            w = (24f * d).toInt().coerceAtLeast(24)
-            h = (24f * d).toInt().coerceAtLeast(24)
+            w = (28f * d).toInt().coerceAtLeast(28)
+            h = (28f * d).toInt().coerceAtLeast(28)
         }
         if (chromebook && normW > 0f) {
             val density = host.resources.displayMetrics.density
@@ -392,11 +290,8 @@ class CursorController(private val chromebook: Boolean = false) {
     }
 
     companion object {
-        private const val TAG = "CursorController"
         private const val LOCAL_DRIVE_MS = 280L
         private const val LOCAL_HANDOFF_MS = 40L
-        /** Software-fallback lead; native path needs none. */
         private const val LOCAL_PREDICT = 0.9f
-        private const val CURSOR_BOOST = 1.35f
     }
 }

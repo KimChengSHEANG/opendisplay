@@ -31,11 +31,11 @@ import com.peetzweg.opendisplay.video.VideoDecoder
 import java.util.Base64
 
 /**
- * Fullscreen video surface the Mac's stream is decoded onto.
+ * Fullscreen video surface the Mac's stream is decoded onto, with a sibling
+ * [ImageView] for the local cursor sprite.
  *
- * Chromebook: a transparent hit layer above the SurfaceView hosts the OS
- * [PointerIcon] (native monitor-like pointer speed). SurfaceView cannot show
- * PointerIcons on ARC. Phones use an [ImageView] overlay instead.
+ * Chromebook always uses the software overlay: ARC does not reliably draw
+ * [PointerIcon], which previously left the cursor invisible.
  */
 @Composable
 fun StreamingScreen(
@@ -56,6 +56,13 @@ fun StreamingScreen(
             val chromebook = ReceiverSession.deviceKind(context) == "Chromebook"
             val root = FrameLayout(context).apply {
                 setBackgroundColor(android.graphics.Color.BLACK)
+                if (chromebook && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    // Hide the tiny ARC system pointer — we draw the Mac sprite.
+                    pointerIcon = PointerIcon.getSystemIcon(
+                        context,
+                        PointerIcon.TYPE_NULL,
+                    )
+                }
             }
             val cursorView = ImageView(context).apply {
                 scaleType = ImageView.ScaleType.FIT_XY
@@ -71,7 +78,6 @@ fun StreamingScreen(
             val video: View = SurfaceView(context).also { surfaceView ->
                 surfaceView.holder.setFormat(PixelFormat.OPAQUE)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    // SurfaceView never shows PointerIcon on ARC — keep null.
                     surfaceView.pointerIcon = PointerIcon.getSystemIcon(
                         context,
                         PointerIcon.TYPE_NULL,
@@ -134,16 +140,6 @@ fun StreamingScreen(
                     }
                 })
             }
-            // Transparent hit target above the video: ARC draws PointerIcon on
-            // normal Views (not SurfaceView). This is the 60Hz-monitor path.
-            val pointerLayer = View(context).apply {
-                isClickable = false
-                isFocusable = true
-                isFocusableInTouchMode = false
-                if (chromebook && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    pointerIcon = PointerIcon.getSystemIcon(context, PointerIcon.TYPE_ARROW)
-                }
-            }
             root.addView(
                 video,
                 FrameLayout.LayoutParams(
@@ -151,33 +147,22 @@ fun StreamingScreen(
                     FrameLayout.LayoutParams.MATCH_PARENT,
                 ),
             )
-            root.addView(
-                pointerLayer,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                ),
-            )
+            // Cursor above the video so hole-punch compositing can't hide it.
             root.addView(
                 cursorView,
                 FrameLayout.LayoutParams(0, 0).apply { gravity = Gravity.TOP or Gravity.START },
             )
-            cursorController.attach(
-                root,
-                cursorView,
-                pointerTarget = if (chromebook) pointerLayer else null,
-            )
-            val inputView: View = if (chromebook) pointerLayer else video
-            inputView.isFocusable = true
-            inputView.isFocusableInTouchMode = false
+            cursorController.attach(root, cursorView)
+            video.isFocusable = true
+            video.isFocusableInTouchMode = false
             val hoverMac = if (chromebook) HoverMacThrottle(forwarder, minIntervalMs = 4L) else null
-            inputView.setOnTouchListener { view, event ->
+            video.setOnTouchListener { view, event ->
                 if (chromebook && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     view.requestUnbufferedDispatch(event)
                 }
                 handleTouch(forwarder, cursorController, chromebook, view.width, view.height, event)
             }
-            inputView.setOnHoverListener { view, event ->
+            video.setOnHoverListener { view, event ->
                 if (chromebook && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     view.requestUnbufferedDispatch(event)
                 }
@@ -186,7 +171,7 @@ fun StreamingScreen(
                     view.width, view.height, event,
                 )
             }
-            inputView.setOnGenericMotionListener { view, event ->
+            video.setOnGenericMotionListener { view, event ->
                 handleGenericMotion(forwarder, view.width, view.height, event)
             }
             root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
@@ -329,10 +314,7 @@ private fun handleHover(
             val samples = pointerSamples(event, pointerIndex = 0)
             if (samples.isEmpty()) return true
             val last = samples.last()
-            // Software overlay only when native PointerIcon isn't live.
-            if (!cursor.usesNativePointer) {
-                moveLocalCursor(cursor, last.first, last.second, width, height)
-            }
+            moveLocalCursor(cursor, last.first, last.second, width, height)
             if (hoverMac != null) {
                 hoverMac.onHover(last.first, last.second, width, height)
             } else {
