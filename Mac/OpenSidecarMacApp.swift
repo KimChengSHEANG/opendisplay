@@ -75,8 +75,15 @@ enum MainWindow {
 
     static func show() {
         if window == nil {
+            let screen = NSScreen.main?.visibleFrame
+                ?? NSRect(x: 0, y: 0, width: 560, height: 700)
+            let width: CGFloat = 560
+            let height = screen.height
+            let origin = NSPoint(
+                x: screen.midX - width / 2,
+                y: screen.minY)
             let w = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 560, height: 700),
+                contentRect: NSRect(origin: origin, size: NSSize(width: width, height: height)),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered, defer: false)
             w.title = "OpenDisplay"
@@ -85,7 +92,6 @@ enum MainWindow {
                 rootView: ContentView(controller: SenderController.shared,
                                       updater: updater))
             w.isReleasedWhenClosed = false
-            w.center()
             window = w
         }
         window?.makeKeyAndOrderFront(nil)
