@@ -3,6 +3,35 @@ import Network
 import Combine
 import Sparkle
 
+/// How the Mac finds receivers — mirrors Android `ConnectionMode`.
+enum ConnectionMode: String, CaseIterable, Identifiable {
+    case both, usb, wifi
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .both: return "USB & WiFi"
+        case .usb: return "USB only"
+        case .wifi: return "WiFi only"
+        }
+    }
+
+    var allowsUSB: Bool { self != .wifi }
+    var allowsWiFi: Bool { self != .usb }
+
+    var explanation: String {
+        switch self {
+        case .both:
+            return "Auto-connect over USB when cabled, otherwise WiFi."
+        case .usb:
+            return "Only USB / adb — WiFi discovery and failover off for this device."
+        case .wifi:
+            return "Only WiFi (Bonjour) — USB auto-connect and cable upgrades off."
+        }
+    }
+}
+
 /// How the app presents itself. One bundle, switched at runtime via the
 /// activation policy — like Raycast/Hammerspoon style background agents.
 enum AppPresentation: String, CaseIterable {
@@ -204,6 +233,14 @@ final class SenderController: ObservableObject {
     @Published var quality = StreamQuality.parse(UserDefaults.standard.string(forKey: "quality") ?? "") ?? .best {
         didSet { UserDefaults.standard.set(quality.rawValue, forKey: "quality") }
     }
+    /// USB & WiFi / USB only / WiFi only — default for devices without an override.
+    @Published var connectionMode =
+        ConnectionMode(rawValue: UserDefaults.standard.string(forKey: "connectionMode") ?? "") ?? .both {
+        didSet {
+            UserDefaults.standard.set(connectionMode.rawValue, forKey: "connectionMode")
+            applyConnectionMode()
+        }
+    }
     /// Per-device virtual-display size ("Larger Text" / "Standard" / "More Space"),
     /// keyed by install id (preferred) or session/entry id. Survives reconnects.
     @Published private var resolutionByDevice: [String: String] =
@@ -211,8 +248,11 @@ final class SenderController: ObservableObject {
         didSet { UserDefaults.standard.set(resolutionByDevice, forKey: "resolutionByDevice") }
     }
     /// Per-device sharpness preset (`StreamQuality` raw value).
-    @Published private var qualityByDevice: [String: String] =
-        UserDefaults.standard.dictionary(forKey: "qualityByDevice") as? [String: String] ?? [:] {
+    @Published private var qualityByDevice: [String: String] = {
+        let raw = UserDefaults.standard.dictionary(forKey: "qualityByDevice") as? [String: String] ?? [:]
+        // Drop legacy supersample presets (>100%) so pickers stay on valid cases.
+        return raw.mapValues { StreamQuality.parse($0)?.rawValue ?? StreamQuality.best.rawValue }
+    }() {
         didSet { UserDefaults.standard.set(qualityByDevice, forKey: "qualityByDevice") }
     }
     /// Per-device frame rate (`StreamFrameRate` raw Int as String).
@@ -220,10 +260,10 @@ final class SenderController: ObservableObject {
         UserDefaults.standard.dictionary(forKey: "frameRateByDevice") as? [String: String] ?? [:] {
         didSet { UserDefaults.standard.set(frameRateByDevice, forKey: "frameRateByDevice") }
     }
-    /// Per-device local cursor echo ("1" / "0"). Absent → On.
-    @Published private var localCursorByDevice: [String: String] =
-        UserDefaults.standard.dictionary(forKey: "localCursorByDevice") as? [String: String] ?? [:] {
-        didSet { UserDefaults.standard.set(localCursorByDevice, forKey: "localCursorByDevice") }
+    /// Per-device connection mode (`ConnectionMode` raw value). Absent → global default.
+    @Published private var connectionModeByDevice: [String: String] =
+        UserDefaults.standard.dictionary(forKey: "connectionModeByDevice") as? [String: String] ?? [:] {
+        didSet { UserDefaults.standard.set(connectionModeByDevice, forKey: "connectionModeByDevice") }
     }
 
     var running: Bool { !sessions.isEmpty }
@@ -307,7 +347,7 @@ final class SenderController: ObservableObject {
     private let hostSleepObserver = HostSleepObserver()
 
     init() {
-        startBrowsing()
+        if needsWiFiDiscovery { startBrowsing() }
         usbWatcher = UsbmuxDeviceWatcher { [weak self] devices in
             guard let self else { return }
             let detached = Set(self.usbDevices.map(\.udid)).subtracting(devices.map(\.udid))
@@ -351,11 +391,13 @@ final class SenderController: ObservableObject {
     }
 
     private func startBrowsing() {
+        guard browser == nil else { return }
         // TXT records carry the receiver's install id (new receivers).
         let browser = NWBrowser(for: .bonjourWithTXTRecord(type: "_opensidecar._tcp", domain: nil), using: .tcp)
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard self.connectionMode.allowsWiFi else { return }
                 self.discovered = Array(results)
                 self.endSessionsWhoseServiceVanished()
                 self.autoConnect()
@@ -363,6 +405,92 @@ final class SenderController: ObservableObject {
         }
         browser.start(queue: .main)
         self.browser = browser
+    }
+
+    private func stopBrowsing() {
+        browser?.cancel()
+        browser = nil
+        discovered = []
+    }
+
+    /// Start/stop Bonjour and drop sessions that the new mode forbids.
+    private func applyConnectionMode() {
+        refreshWiFiDiscovery()
+        for session in sessions {
+            enforceConnectionMode(on: session)
+        }
+        autoConnect()
+    }
+
+    /// Bonjour stays up when the global default or any device override needs WiFi.
+    private var needsWiFiDiscovery: Bool {
+        if connectionMode.allowsWiFi { return true }
+        return connectionModeByDevice.values.contains {
+            ConnectionMode(rawValue: $0)?.allowsWiFi == true
+        }
+    }
+
+    private func refreshWiFiDiscovery() {
+        if needsWiFiDiscovery {
+            startBrowsing()
+        } else {
+            stopBrowsing()
+        }
+    }
+
+    /// End or migrate a live session so it matches its effective connection mode.
+    private func enforceConnectionMode(on session: DeviceSession) {
+        let mode = connectionMode(for: session)
+        if session.onUSB, !mode.allowsUSB {
+            if mode.allowsWiFi, let result = wifiService(for: session) {
+                Log.info("connection mode \(mode.rawValue) — migrating \(session.id) to WiFi")
+                session.onUSB = false
+                session.wifiServiceName = serviceName(of: result)
+                session.sender.switchTransport(to: .tcp(result.endpoint))
+            } else {
+                end(session)
+            }
+        } else if !session.onUSB, !mode.allowsWiFi {
+            if mode.allowsUSB, let udid = session.usbUDID,
+               let device = usbDevices.first(where: { $0.udid == udid }) {
+                upgradeToUSB(session, device: device)
+            } else if mode.allowsUSB, let serial = session.adbSerial,
+                      androidDevices.contains(where: { $0.serial == serial && $0.authorized && !$0.isNetwork }) {
+                upgradeToAndroidUSB(session, serial: serial)
+            } else if mode.allowsUSB,
+                      let serial = androidDevices.first(where: {
+                          $0.authorized && !$0.isNetwork && sameAndroidSession(session, serial: $0.serial)
+                      })?.serial {
+                upgradeToAndroidUSB(session, serial: serial)
+            } else {
+                end(session)
+            }
+        } else if !session.onUSB, mode.allowsUSB {
+            // Prefer cable when both transports are allowed.
+            if let udid = session.usbUDID,
+               let device = usbDevices.first(where: { $0.udid == udid }) {
+                upgradeToUSB(session, device: device)
+            } else if let device = usbDevices.first(where: {
+                activeSession(coveringUSB: $0)?.id == session.id || sameDeviceSession(session, usb: $0)
+            }) {
+                upgradeToUSB(session, device: device)
+            }
+        }
+    }
+
+    private func sameDeviceSession(_ session: DeviceSession, usb device: UsbmuxDevice) -> Bool {
+        if let id = session.deviceID, installIDByUDID[device.udid] == id { return true }
+        return false
+    }
+
+    private func sameAndroidSession(_ session: DeviceSession, serial: String) -> Bool {
+        if session.adbSerial == serial { return true }
+        if let id = session.deviceID, installIDByAdbSerial[serial] == id { return true }
+        if let name = session.wifiServiceName,
+           let result = discovered.first(where: { serviceName(of: $0) == name }) {
+            return sameAndroidDevice(result, serial: serial)
+        }
+        return false
     }
 
     // MARK: - Physical-device identity
@@ -518,11 +646,14 @@ final class SenderController: ObservableObject {
         dedupeSessions()
         // The -host/-port escape hatch is an explicit choice — dial it like
         // the wired devices (it joins them, not replaces them).
-        if UserDefaults.standard.object(forKey: "host") != nil,
+        if connectionMode.allowsUSB,
+           UserDefaults.standard.object(forKey: "host") != nil,
            !usbDisabled.contains("usb:first"), session(for: "usb:first") == nil {
             connect(to: .usb(udid: nil))
         }
         for device in usbDevices {
+            let mode = connectionMode(forUSB: device)
+            guard mode.allowsUSB else { continue }
             if let covering = activeSession(coveringUSB: device) {
                 // usbDisabled gates auto-connecting a device, not the
                 // transport of a session the user deliberately has running —
@@ -539,6 +670,8 @@ final class SenderController: ObservableObject {
         // (wifiDisabled or not advertising yet).
         for device in androidDevices where device.authorized {
             if device.isNetwork && !device.isChromebook { continue }
+            let mode = connectionMode(forAndroid: device.serial)
+            guard mode.allowsUSB else { continue }
             let target = ConnectionTarget.androidUsb(serial: device.serial)
             if let covering = activeSession(coveringAndroid: device.serial) {
                 if !device.isNetwork { upgradeToAndroidUSB(covering, serial: device.serial) }
@@ -546,7 +679,8 @@ final class SenderController: ObservableObject {
                       session(for: target.sessionID) == nil {
                 // Prefer Bonjour when the Chromebook is advertising and not
                 // opted out — avoid racing a WiFi auto-connect with ADB.
-                if device.isNetwork,
+                if mode.allowsWiFi,
+                   device.isNetwork,
                    let result = discovered.first(where: { sameAndroidDevice($0, serial: device.serial) }),
                    let name = serviceName(of: result),
                    !wifiDisabled.contains(ConnectionTarget.wifi(result).sessionID),
@@ -563,10 +697,12 @@ final class SenderController: ObservableObject {
         // every visible service the user hasn't opted out of; the arm delay
         // above still lets dual-transport devices take the cable first.
         for result in discovered {
+            let mode = connectionMode(forWiFi: result)
+            guard mode.allowsWiFi else { continue }
             let target = ConnectionTarget.wifi(result)
             if !wifiDisabled.contains(target.sessionID),
                activeSession(coveringWiFi: result) == nil,
-               !cabled(result) {
+               !(mode.allowsUSB && cabled(result)) {
                 Log.info("auto-connect WiFi \(target.sessionID)")
                 connect(to: target)
             }
@@ -642,6 +778,7 @@ final class SenderController: ObservableObject {
     /// Cable plugged in while the device streams over WiFi: migrate the live
     /// session onto USB. No-op when the session is already cabled.
     private func upgradeToUSB(_ session: DeviceSession, device: UsbmuxDevice) {
+        guard connectionMode(for: session).allowsUSB else { return }
         guard !session.onUSB, let portNum = UInt16(port) else { return }
         Log.info("cable attached for \(session.id) — migrating to USB")
         session.onUSB = true
@@ -656,6 +793,7 @@ final class SenderController: ObservableObject {
     /// `adb forward` for a **physical USB** serial. Network `adb connect`
     /// is skipped — direct Bonjour is better than tunneling through adbd.
     private func upgradeToAndroidUSB(_ session: DeviceSession, serial: String) {
+        guard connectionMode(for: session).allowsUSB else { return }
         if serial.contains(":") { return }
         // Already on this ADB tunnel — nothing to do.
         if session.onUSB, session.adbSerial == serial { return }
@@ -687,6 +825,7 @@ final class SenderController: ObservableObject {
     private func failover(detachedUDIDs: Set<String>) {
         guard autoConnectEnabled, !detachedUDIDs.isEmpty else { return }
         for session in sessions where session.onUSB {
+            guard connectionMode(for: session).allowsWiFi else { continue }
             guard let udid = session.usbUDID, detachedUDIDs.contains(udid),
                   let result = wifiService(for: session) else { continue }
             Log.info("cable detached for \(session.id) — failing over to WiFi")
@@ -706,7 +845,7 @@ final class SenderController: ObservableObject {
             guard let session = activeSession(coveringAndroid: serial),
                   session.adbSerial == serial || session.id == ConnectionTarget.androidUsb(serial: serial).sessionID
             else { continue }
-            if let result = wifiService(for: session) {
+            if connectionMode(for: session).allowsWiFi, let result = wifiService(for: session) {
                 Log.info("adb device \(serial) detached — failing over to WiFi")
                 session.onUSB = false
                 session.adbSerial = nil
@@ -819,7 +958,7 @@ final class SenderController: ObservableObject {
         session.deviceID ?? session.id
     }
 
-    // MARK: - Per-device stream prefs (resolution / sharpness / fps / cursor)
+    // MARK: - Per-device stream prefs (resolution / sharpness / fps / connection)
 
     func resolution(for session: DeviceSession) -> DisplayResolution {
         resolvedResolution(keys: [devicePrefKey(for: session)], kind: session.deviceKind)
@@ -851,14 +990,13 @@ final class SenderController: ObservableObject {
         return resolvedFrameRate(keys: [entry.id], kind: entry.kindHint)
     }
 
-    func localCursor(for session: DeviceSession) -> Bool {
-        resolvedLocalCursor(keys: [devicePrefKey(for: session)])
+    func connectionMode(for session: DeviceSession) -> ConnectionMode {
+        resolvedConnectionMode(keys: connectionModeKeys(for: session))
     }
 
-    func localCursor(for entry: DeviceEntry) -> Bool {
-        if let session = session(for: entry) { return localCursor(for: session) }
-        if let target = entry.preferredTarget { return resolvedLocalCursor(for: target) }
-        return resolvedLocalCursor(keys: [entry.id])
+    func connectionMode(for entry: DeviceEntry) -> ConnectionMode {
+        if let session = session(for: entry) { return connectionMode(for: session) }
+        return resolvedConnectionMode(keys: connectionModeKeys(for: entry))
     }
 
     func setResolution(_ preset: DisplayResolution, for session: DeviceSession) {
@@ -906,20 +1044,29 @@ final class SenderController: ObservableObject {
               value: String(preset.rawValue), entry: entry)
     }
 
-    func setLocalCursor(_ enabled: Bool, for session: DeviceSession) {
-        let value = enabled ? "1" : "0"
-        applyDevicePref(value, current: localCursor(for: session) ? "1" : "0",
-                        get: { localCursorByDevice }, set: { localCursorByDevice = $0 },
-                        session: session)
+    func setConnectionMode(_ mode: ConnectionMode, for session: DeviceSession) {
+        let previous = connectionMode(for: session)
+        var store = connectionModeByDevice
+        let key = devicePrefKey(for: session)
+        store[key] = mode.rawValue
+        if let installID = session.deviceID { store[installID] = mode.rawValue }
+        for k in preferenceLookupKeys(for: session.target) { store[k] = mode.rawValue }
+        connectionModeByDevice = store
+        guard previous != mode else { return }
+        refreshWiFiDiscovery()
+        enforceConnectionMode(on: session)
+        autoConnect()
     }
 
-    func setLocalCursor(_ enabled: Bool, for entry: DeviceEntry) {
+    func setConnectionMode(_ mode: ConnectionMode, for entry: DeviceEntry) {
         if let session = session(for: entry) {
-            setLocalCursor(enabled, for: session)
+            setConnectionMode(mode, for: session)
             return
         }
-        stamp(get: { localCursorByDevice }, set: { localCursorByDevice = $0 },
-              value: enabled ? "1" : "0", entry: entry)
+        stamp(get: { connectionModeByDevice }, set: { connectionModeByDevice = $0 },
+              value: mode.rawValue, entry: entry)
+        refreshWiFiDiscovery()
+        autoConnect()
     }
 
     /// Persist a string pref under session + install + transport keys; reconnect if changed.
@@ -1001,17 +1148,87 @@ final class SenderController: ObservableObject {
         return StreamFrameRate.default(forDeviceKind: kind)
     }
 
-    private func resolvedLocalCursor(for target: ConnectionTarget) -> Bool {
-        resolvedLocalCursor(keys: preferenceLookupKeys(for: target))
-    }
-
-    private func resolvedLocalCursor(keys: [String]) -> Bool {
+    private func resolvedConnectionMode(keys: [String]) -> ConnectionMode {
         for key in keys {
-            if let raw = localCursorByDevice[key] {
-                return raw == "1" || raw.lowercased() == "true"
+            if let raw = connectionModeByDevice[key], let value = ConnectionMode(rawValue: raw) {
+                return value
             }
         }
-        return true
+        return connectionMode
+    }
+
+    private func connectionModeKeys(for session: DeviceSession) -> [String] {
+        var keys = [devicePrefKey(for: session)]
+        keys.append(contentsOf: preferenceLookupKeys(for: session.target))
+        if let udid = session.usbUDID {
+            keys.append("usb:\(udid)")
+            keys.append("device:\(udid)")
+        }
+        if let serial = session.adbSerial {
+            keys.append("android:\(serial)")
+            keys.append(ConnectionTarget.androidUsb(serial: serial).sessionID)
+        }
+        if let name = session.wifiServiceName {
+            keys.append("wifi:\(name)")
+            keys.append("service:\(name)")
+        }
+        return keys
+    }
+
+    private func connectionModeKeys(for entry: DeviceEntry) -> [String] {
+        var keys = [entry.id]
+        if let target = entry.usbTarget {
+            keys.append(contentsOf: preferenceLookupKeys(for: target))
+        }
+        if let target = entry.wifiTarget {
+            keys.append(contentsOf: preferenceLookupKeys(for: target))
+        }
+        return keys
+    }
+
+    private func connectionMode(forUSB device: UsbmuxDevice) -> ConnectionMode {
+        var keys = ["usb:\(device.udid)", "device:\(device.udid)"]
+        if let id = installIDByUDID[device.udid] { keys.insert(id, at: 0) }
+        if let twin = discovered.first(where: { sameDevice($0, device) }) {
+            keys.append(contentsOf: preferenceLookupKeys(for: .wifi(twin)))
+        }
+        if let covering = activeSession(coveringUSB: device) {
+            keys.insert(contentsOf: connectionModeKeys(for: covering), at: 0)
+        }
+        return resolvedConnectionMode(keys: keys)
+    }
+
+    private func connectionMode(forAndroid serial: String) -> ConnectionMode {
+        var keys = ["android:\(serial)", ConnectionTarget.androidUsb(serial: serial).sessionID]
+        if let id = installIDByAdbSerial[serial] { keys.insert(id, at: 0) }
+        if let twin = discovered.first(where: { sameAndroidDevice($0, serial: serial) }) {
+            keys.append(contentsOf: preferenceLookupKeys(for: .wifi(twin)))
+        }
+        if let covering = activeSession(coveringAndroid: serial) {
+            keys.insert(contentsOf: connectionModeKeys(for: covering), at: 0)
+        }
+        return resolvedConnectionMode(keys: keys)
+    }
+
+    private func connectionMode(forWiFi result: NWBrowser.Result) -> ConnectionMode {
+        var keys = preferenceLookupKeys(for: .wifi(result))
+        if let name = serviceName(of: result) {
+            keys.append("service:\(name)")
+        }
+        if let covering = activeSession(coveringWiFi: result) {
+            keys.insert(contentsOf: connectionModeKeys(for: covering), at: 0)
+        }
+        // Fold USB/adb twin prefs so a device-level override applies on either side.
+        if let device = usbDevices.first(where: { sameDevice(result, $0) }) {
+            keys.append(contentsOf: ["usb:\(device.udid)", "device:\(device.udid)"])
+            if let id = installIDByUDID[device.udid] { keys.insert(id, at: 0) }
+        }
+        for device in androidDevices where sameAndroidDevice(result, serial: device.serial) {
+            keys.append(contentsOf: ["android:\(device.serial)",
+                                     ConnectionTarget.androidUsb(serial: device.serial).sessionID])
+            if let id = installIDByAdbSerial[device.serial] { keys.insert(id, at: 0) }
+        }
+        return resolvedConnectionMode(keys: keys)
     }
 
     private func preferenceLookupKeys(for target: ConnectionTarget) -> [String] {
@@ -1134,12 +1351,11 @@ final class SenderController: ObservableObject {
         let displayResolution = resolvedResolution(for: target)
         let streamQuality = resolvedQuality(for: target)
         let streamFrameRate = resolvedFrameRate(for: target)
-        let streamLocalCursor = resolvedLocalCursor(for: target)
         let sender = MacSender(transport: transport, name: name, mode: mode,
                                quality: streamQuality,
                                displayResolution: displayResolution,
                                frameRate: streamFrameRate,
-                               localCursor: streamLocalCursor,
+                               localCursor: true,
                                displaySerial: Self.displaySerial(for: id),
                                awaitingWake: awaitingWake)
         let session = DeviceSession(id: id, target: target, name: name, sender: sender)
@@ -1159,7 +1375,7 @@ final class SenderController: ObservableObject {
                 self.migratePref(\.resolutionByDevice, from: session.id, to: installID)
                 self.migratePref(\.qualityByDevice, from: session.id, to: installID)
                 self.migratePref(\.frameRateByDevice, from: session.id, to: installID)
-                self.migratePref(\.localCursorByDevice, from: session.id, to: installID)
+                self.migratePref(\.connectionModeByDevice, from: session.id, to: installID)
             }
             if let kind = info.device {
                 self.rememberReceiverKind(kind, installID: info.id, target: session.target)
@@ -1428,7 +1644,26 @@ final class SenderController: ObservableObject {
             entries.append(DeviceEntry(id: session.id, name: session.name,
                                        usbTarget: nil, wifiTarget: nil))
         }
-        return entries
+        return entries.compactMap { filterEntryForConnectionMode($0) }
+    }
+
+    /// Strip transports the effective connection mode forbids; drop rows that
+    /// would have no remaining path (unless a live session still needs a row).
+    private func filterEntryForConnectionMode(_ entry: DeviceEntry) -> DeviceEntry? {
+        let mode = connectionMode(for: entry)
+        let usb = mode.allowsUSB ? entry.usbTarget : nil
+        let wifi = mode.allowsWiFi ? entry.wifiTarget : nil
+        if usb == nil && wifi == nil {
+            // Orphan session rows (both targets already nil) always stay.
+            if entry.usbTarget == nil && entry.wifiTarget == nil { return entry }
+            // Mode removed every transport — keep only while streaming.
+            guard session(for: entry) != nil else { return nil }
+            return DeviceEntry(id: entry.id, name: entry.name,
+                               usbTarget: nil, wifiTarget: nil, kindHint: entry.kindHint)
+        }
+        if usb == entry.usbTarget && wifi == entry.wifiTarget { return entry }
+        return DeviceEntry(id: entry.id, name: entry.name,
+                           usbTarget: usb, wifiTarget: wifi, kindHint: entry.kindHint)
     }
 
     func session(for entry: DeviceEntry) -> DeviceSession? {
@@ -1577,6 +1812,17 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: controller.mode) { controller.restartAll() }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Picker("Default connection", selection: $controller.connectionMode) {
+                        ForEach(ConnectionMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    Text("Used when a device has no Connection override. \(controller.connectionMode.explanation)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
                 VStack(alignment: .leading, spacing: 4) {
                     Picker("Default sharpness", selection: $controller.quality) {
@@ -1784,7 +2030,7 @@ struct SessionRow: View {
     }
 }
 
-/// Per-device Resolution / Sharpness / Frame rate / Local cursor pickers.
+/// Per-device Resolution / Sharpness / Frame rate / Connection pickers.
 struct DeviceStreamSettings: View {
     let controller: SenderController
     var session: DeviceSession?
@@ -1832,22 +2078,29 @@ struct DeviceStreamSettings: View {
         )
     }
 
-    private var localCursor: Binding<Bool> {
+    private var connection: Binding<ConnectionMode> {
         Binding(
             get: {
-                if let session { return controller.localCursor(for: session) }
-                if let entry { return controller.localCursor(for: entry) }
-                return true
+                if let session { return controller.connectionMode(for: session) }
+                if let entry { return controller.connectionMode(for: entry) }
+                return controller.connectionMode
             },
             set: {
-                if let session { controller.setLocalCursor($0, for: session) }
-                else if let entry { controller.setLocalCursor($0, for: entry) }
+                if let session { controller.setConnectionMode($0, for: session) }
+                else if let entry { controller.setConnectionMode($0, for: entry) }
             }
         )
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
+            settingRow("Connection") {
+                Picker("Connection", selection: connection) {
+                    ForEach(ConnectionMode.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+            }
             settingRow("Resolution") {
                 Picker("Resolution", selection: resolution) {
                     ForEach(DisplayResolution.allCases) { option in
@@ -1869,12 +2122,10 @@ struct DeviceStreamSettings: View {
                     }
                 }
             }
-            settingRow("Local cursor") {
-                Picker("Local cursor", selection: localCursor) {
-                    Text("On").tag(true)
-                    Text("Off").tag(false)
-                }
-            }
+            Text(connection.wrappedValue.explanation)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
             Text(resolution.wrappedValue.explanation)
                 .font(.caption2)
                 .foregroundStyle(.secondary)

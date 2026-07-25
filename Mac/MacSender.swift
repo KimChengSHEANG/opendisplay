@@ -27,15 +27,9 @@ enum CaptureMode: String {
 /// Capture-resolution / bitrate trade-off — exposed in the UI as **Sharpness**.
 /// The virtual display always runs at native size; only the captured/encoded
 /// stream is scaled, so lower percents cut encode, transmit, and decode time
-/// at the cost of sharpness. Values above 100% supersample the framebuffer
-/// (SCK upscales before encode) for sharper text after the receiver scales
-/// down. Raw values are percent strings (`"200"`…`"40"`); legacy `best` /
-/// `balanced` / `fast` still parse via [`parse`].
+/// at the cost of sharpness. Raw values are percent strings (`"100"`…`"40"`);
+/// legacy `best` / `balanced` / `fast` still parse via [`parse`].
 enum StreamQuality: String, CaseIterable, Identifiable {
-    case p200 = "200"
-    case p175 = "175"
-    case p150 = "150"
-    case p125 = "125"
     case p100 = "100"
     case p90 = "90"
     case p80 = "80"
@@ -44,7 +38,7 @@ enum StreamQuality: String, CaseIterable, Identifiable {
     case p50 = "50"
     case p40 = "40"
 
-    /// Default / full-panel capture (not the absolute max — see p125+).
+    /// Full-panel capture.
     static let best = Self.p100
 
     var id: String { rawValue }
@@ -65,10 +59,6 @@ enum StreamQuality: String, CaseIterable, Identifiable {
 
     var explanation: String {
         switch self {
-        case .p200:
-            return "200% supersampled capture — sharpest text, highest bandwidth."
-        case .p175, .p150, .p125:
-            return "\(rawValue)% supersampled capture — sharper than full panel, higher bandwidth."
         case .p100:
             return "Full panel resolution — 1:1 with the framebuffer."
         case .p40:
@@ -79,8 +69,10 @@ enum StreamQuality: String, CaseIterable, Identifiable {
     }
 
     /// Accept current percent raw values plus legacy Sharp/Balanced/Soft keys.
+    /// Former supersample presets (`125`…`200`) clamp to 100%.
     static func parse(_ raw: String) -> StreamQuality? {
         if let value = StreamQuality(rawValue: raw) { return value }
+        if let n = Int(raw), n > 100 { return .p100 }
         switch raw {
         case "best": return .p100
         case "balanced": return .p70
@@ -327,8 +319,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // capture→encode→stream→display latency (~30ms perceived). Instead we
     // hide it from capture and stream its position on the control channel —
     // the phone draws it locally on the ~2ms path the touches use.
-    // Per-session from the UI; global kill-switch still honored:
-    // `defaults write … localCursor -bool false`.
+    // Always on; optional kill-switch: `defaults write … localCursor -bool false`.
     private let localCursor: Bool
     private var cursorTimer: DispatchSourceTimer?
     private var cursorImageTimer: DispatchSourceTimer?
@@ -367,7 +358,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         self.quality = quality
         self.displayResolution = displayResolution
         self.frameRatePreset = frameRate
-        // Global defaults-write kill-switch still wins over the per-device toggle.
+        // Always on unless the optional defaults-write kill-switch is set.
         let globalCursor = UserDefaults.standard.object(forKey: "localCursor") == nil
             || UserDefaults.standard.bool(forKey: "localCursor")
         self.localCursor = localCursor && globalCursor
