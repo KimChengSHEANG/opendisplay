@@ -85,6 +85,14 @@ class VideoDecoder(
     @Volatile
     private var keyframeRequested: Boolean = false
 
+    /**
+     * After codec create/rebuild, reject non-IDR access units until one sync
+     * frame is queued. Feeding P-frames into a fresh ARC VDA is the usual
+     * Chromebook "solid green" failure after reconnect.
+     */
+    @Volatile
+    private var awaitingSync: Boolean = true
+
     fun consumeNeedsKeyframe(): Boolean {
         if (!keyframeRequested) return false
         keyframeRequested = false
@@ -129,6 +137,7 @@ class VideoDecoder(
                 sps = null
                 pps = null
                 hasRendered = false
+                awaitingSync = true
                 keyframeRequested = false
             }
             callbackThread.quitSafely()
@@ -167,8 +176,13 @@ class VideoDecoder(
             val p = pps
             if (s != null && p != null) startCodec(s, p) else return
         }
-        val accessUnit = annexBWithoutParameterSets(frame) ?: return
         val isSync = containsIdr(frame)
+        if (awaitingSync && !isSync) {
+            // Fresh codec / post-rebuild — wait for IDR; P-frames green VDA.
+            keyframeRequested = true
+            return
+        }
+        val accessUnit = annexBWithoutParameterSets(frame) ?: return
         val c = codec ?: return
         try {
             drainOutput(c)
@@ -193,6 +207,7 @@ class VideoDecoder(
             val flags = if (isSync) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
             val ptsUs = System.nanoTime() / 1000
             c.queueInputBuffer(index, 0, accessUnit.size, ptsUs, flags)
+            if (isSync) awaitingSync = false
             timings.noteQueued(ptsUs, System.nanoTime())
             // Nothing queued behind this frame: wait briefly so it reaches the
             // panel now rather than on the next frame off the network. Without
@@ -204,6 +219,7 @@ class VideoDecoder(
             // VDA often dies after a SurfaceView abandon — rebuild on next IDR.
             releaseCodec()
             keyframeRequested = true
+            awaitingSync = true
             sps = null
             pps = null
         }
@@ -213,6 +229,7 @@ class VideoDecoder(
         val c = codec
         codec = null
         hasRendered = false
+        awaitingSync = true
         if (c == null) return
         try {
             c.stop()

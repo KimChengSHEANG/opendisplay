@@ -128,6 +128,17 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         start()
     }
 
+    /**
+     * Drop the live Mac socket so it redials. Used when Chromebook VDA is stuck
+     * on a solid green / never-rendered surface after reconnect — a fresh TCP
+     * session remounts the SurfaceView and forces a new SPS+PPS+IDR.
+     */
+    fun forcePeerReconnect(reason: String) {
+        if (clientSocket == null) return
+        android.util.Log.w("ReceiverSession", "forcePeerReconnect: $reason")
+        closeClient(notify = true)
+    }
+
     /** Send control JSON; auto-stamps touch with Mac-clock `t` when synced. */
     fun sendControl(map: Map<String, Any>) {
         val stamped = SessionTelemetry.stampTouch(map, nowMs(), clockOffsetMs)

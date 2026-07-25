@@ -4,8 +4,12 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.PixelCopy
 import android.view.PointerIcon
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -41,6 +45,7 @@ fun StreamingScreen(
     cursorController: CursorController,
     onSurfaceReady: (VideoDecoder) -> Unit,
     onSurfaceDestroyed: () -> Unit,
+    onGreenScreen: () -> Unit = {},
     onControl: (Map<String, Any>) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -88,6 +93,8 @@ fun StreamingScreen(
                     )
                 }
                 var started = false
+                var greenWatch: Runnable? = null
+                val handler = Handler(Looper.getMainLooper())
                 surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
                     override fun surfaceCreated(holder: SurfaceHolder) {}
 
@@ -108,10 +115,41 @@ fun StreamingScreen(
                                 preferHardwareAvc = chromebook,
                             ),
                         )
+                        if (chromebook) {
+                            greenWatch?.let { handler.removeCallbacks(it) }
+                            var checks = 0
+                            var greenHits = 0
+                            lateinit var watch: Runnable
+                            watch = Runnable {
+                                if (!started) return@Runnable
+                                checks++
+                                sampleGreenScreen(surfaceView) { green ->
+                                    if (!started) return@sampleGreenScreen
+                                    if (green) {
+                                        greenHits++
+                                        // Two consecutive green samples (~1.5s)
+                                        // → force Mac reconnect (quality unchanged).
+                                        if (greenHits >= 2) {
+                                            Log.w(TAG, "green screen detected — requesting reconnect")
+                                            onGreenScreen()
+                                            return@sampleGreenScreen
+                                        }
+                                    } else {
+                                        greenHits = 0
+                                    }
+                                    if (checks < 8) handler.postDelayed(watch, 750)
+                                }
+                            }
+                            greenWatch = watch
+                            // First paint can lag the IDR; start sampling after 1s.
+                            handler.postDelayed(watch, 1_000)
+                        }
                     }
 
                     override fun surfaceDestroyed(holder: SurfaceHolder) {
                         started = false
+                        greenWatch?.let { handler.removeCallbacks(it) }
+                        greenWatch = null
                         onSurfaceDestroyed()
                     }
                 })
@@ -151,6 +189,69 @@ fun StreamingScreen(
         },
     )
 }
+
+private const val TAG = "StreamingScreen"
+
+/**
+ * Sample a tiny downscale of the SurfaceView. Uninitialized / desynced VDA
+ * output is typically solid green (Y=0 UV≈0 → green in RGB).
+ */
+private fun sampleGreenScreen(surfaceView: SurfaceView, done: (Boolean) -> Unit) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+        done(false)
+        return
+    }
+    if (!surfaceView.holder.surface.isValid) {
+        done(false)
+        return
+    }
+    val bmp = Bitmap.createBitmap(48, 27, Bitmap.Config.ARGB_8888)
+    try {
+        PixelCopy.request(surfaceView, bmp, { result ->
+            if (result != PixelCopy.SUCCESS) {
+                done(false)
+                return@request
+            }
+            done(isMostlyGreen(bmp))
+            bmp.recycle()
+        }, Handler(Looper.getMainLooper()))
+    } catch (e: Exception) {
+        Log.w(TAG, "PixelCopy failed: ${e.message}")
+        bmp.recycle()
+        done(false)
+    }
+}
+
+/** True when ≥85% of samples look like solid VDA-green (high G, low R/B). */
+internal fun isMostlyGreen(bitmap: Bitmap): Boolean {
+    val w = bitmap.width
+    val h = bitmap.height
+    if (w <= 0 || h <= 0) return false
+    var green = 0
+    var total = 0
+    // Sparse grid — enough to spot a full-frame green panel.
+    val stepX = maxOf(1, w / 12)
+    val stepY = maxOf(1, h / 8)
+    var y = 0
+    while (y < h) {
+        var x = 0
+        while (x < w) {
+            val c = bitmap.getPixel(x, y)
+            val r = (c shr 16) and 0xFF
+            val g = (c shr 8) and 0xFF
+            val b = c and 0xFF
+            if (isVdaGreenPixel(r, g, b)) green++
+            total++
+            x += stepX
+        }
+        y += stepY
+    }
+    return total > 0 && green * 100 / total >= 85
+}
+
+/** Solid green / dark-green from zeroed YUV — not typical desktop content. */
+internal fun isVdaGreenPixel(r: Int, g: Int, b: Int): Boolean =
+    g >= 60 && g > r + 40 && g > b + 40 && r < 90 && b < 90
 
 /** Decode a Mac `cursorImg` PNG payload (base64). */
 fun decodeCursorPng(base64: String): Bitmap? {

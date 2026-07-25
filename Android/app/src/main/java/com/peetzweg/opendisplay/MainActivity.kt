@@ -67,13 +67,39 @@ class MainActivity : ComponentActivity() {
     /** Latest SPS+PPS+IDR seen while the decode surface wasn't ready yet. */
     @Volatile private var pendingSyncFrame: ByteArray? = null
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val kfRetryRunnable = Runnable {
-        val d = decoder ?: return@Runnable
-        if (session?.isConnected != true) return@Runnable
-        if (!d.hasRendered) session?.sendControl(mapOf("type" to "kf"))
+    /**
+     * Chromebook post-connect recovery: keep asking for IDRs, then force the
+     * Mac to redial if the panel never paints (solid green / blank VDA).
+     */
+    private var recoverAttempt = 0
+    private val recoverRunnable = object : Runnable {
+        override fun run() {
+            val d = decoder ?: return
+            if (session?.isConnected != true) return
+            if (d.hasRendered) {
+                recoverAttempt = 0
+                return
+            }
+            recoverAttempt++
+            session?.sendControl(mapOf("type" to "kf"))
+            if (recoverAttempt >= 5) {
+                // ~2.5s of no paint while connected — tear the socket so Mac
+                // reconnects with a fresh SurfaceView + IDR (no quality change).
+                if (allowForcedReconnect()) {
+                    session?.forcePeerReconnect("no video frame rendered after reconnect")
+                }
+                recoverAttempt = 0
+                return
+            }
+            mainHandler.postDelayed(this, 500)
+        }
     }
     /** Throttle decoder-driven keyframe asks so scroll doesn't IDR-spam. */
     private var lastDecoderKfAtMs: Long = 0
+    /** Rate-limit forced TCP reconnects so a permanent failure can't loop. */
+    private var lastForcedReconnectAtMs: Long = 0
+    private var forcedReconnectsWindow = 0
+    private var forcedReconnectsWindowStartMs: Long = 0
     private var advertiser: DiscoveryAdvertiser? = null
     private var savedBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
     private var lockReceiverRegistered = false
@@ -156,14 +182,21 @@ class MainActivity : ComponentActivity() {
                     if (pending != null) d.feedAnnexB(pending)
                     if (session?.isConnected == true) {
                         session?.sendControl(mapOf("type" to "kf"))
-                        mainHandler.removeCallbacks(kfRetryRunnable)
-                        mainHandler.postDelayed(kfRetryRunnable, 400)
+                        mainHandler.removeCallbacks(recoverRunnable)
+                        recoverAttempt = 0
+                        mainHandler.postDelayed(recoverRunnable, 500)
                     }
                 },
                 onSurfaceDestroyed = {
-                    mainHandler.removeCallbacks(kfRetryRunnable)
+                    mainHandler.removeCallbacks(recoverRunnable)
+                    recoverAttempt = 0
                     decoder?.release()
                     decoder = null
+                },
+                onGreenScreen = {
+                    if (allowForcedReconnect()) {
+                        session?.forcePeerReconnect("green screen detected")
+                    }
                 },
                 onControl = { session?.sendControl(it) },
                 onOpenSettings = { showSettings = true },
@@ -274,7 +307,8 @@ class MainActivity : ComponentActivity() {
         }
         decoder?.release()
         decoder = null
-        mainHandler.removeCallbacks(kfRetryRunnable)
+        mainHandler.removeCallbacks(recoverRunnable)
+        recoverAttempt = 0
     }
 
     /** Rotation: keep the session alive, just tell the Mac about the new panel — see `ReceiverSession.updatePanel`. */
@@ -282,6 +316,23 @@ class MainActivity : ComponentActivity() {
         super.onConfigurationChanged(newConfig)
         val panel = PanelMetrics.of(this)
         session?.updatePanel(panel.wide, panel.high, panel.density)
+    }
+
+    /**
+     * At most 2 forced Mac redials per 30s — enough to clear a green VDA
+     * without spinning if the stream is permanently broken.
+     */
+    private fun allowForcedReconnect(): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - forcedReconnectsWindowStartMs > 30_000) {
+            forcedReconnectsWindowStartMs = now
+            forcedReconnectsWindow = 0
+        }
+        if (forcedReconnectsWindow >= 2) return false
+        if (now - lastForcedReconnectAtMs < 3_000) return false
+        forcedReconnectsWindow++
+        lastForcedReconnectAtMs = now
+        return true
     }
 
     private fun openUrl(url: String) {
@@ -351,7 +402,8 @@ class MainActivity : ComponentActivity() {
                 connected = false
                 cursorController.hide()
                 pendingSyncFrame = null
-                mainHandler.removeCallbacks(kfRetryRunnable)
+                mainHandler.removeCallbacks(recoverRunnable)
+                recoverAttempt = 0
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 if (ReceiverSession.deviceKind(this@MainActivity) == "Chromebook") {
                     setWindowBrightness(null)
@@ -454,6 +506,7 @@ fun OpenDisplayApp(
     onWake: () -> Unit,
     onSurfaceReady: (VideoDecoder) -> Unit,
     onSurfaceDestroyed: () -> Unit,
+    onGreenScreen: () -> Unit,
     onControl: (Map<String, Any>) -> Unit,
     onOpenSettings: () -> Unit,
     onCloseSettings: () -> Unit,
@@ -481,6 +534,7 @@ fun OpenDisplayApp(
                     cursorController = cursorController,
                     onSurfaceReady = onSurfaceReady,
                     onSurfaceDestroyed = onSurfaceDestroyed,
+                    onGreenScreen = onGreenScreen,
                     onControl = onControl,
                 )
                 if (showAnalytics) {

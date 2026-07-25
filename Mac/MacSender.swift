@@ -875,6 +875,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         lastCursorPNGHash = 0
         lastCursorSent = (-1, -1, false)
         lastReceived = Date()  // fresh grace period for the watchdog
+        // If capture is already warm (grace reconnect / transport flip), push
+        // an IDR immediately — don't wait for SCK or the idle watchdog.
+        if let pixelBuffer = lastPixelBuffer {
+            encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
+        }
         receiveControl(on: conn)
         Task { await self.status("Connected to \(self.endpointName)") }
     }
@@ -1236,6 +1241,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                               current.scale == info.scale else { return }
                         await self.reconfigure(info)
                     }
+                } else if mode == .extend, stream != nil {
+                    // Same-size hello on an existing stream = peer remounted
+                    // (Chromebook reconnect). Force an IDR immediately — waiting
+                    // for the next SCK frame leaves ARC VDA on a green panel.
+                    self.needsKeyframe = true
+                    if let pixelBuffer = self.lastPixelBuffer {
+                        Log.info("hello on live stream — forcing keyframe for \(info.kind)")
+                        self.encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
+                    }
                 }
             }
         case "touch":
@@ -1267,9 +1281,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         case "kf":
             // The phone's decoder lost sync (e.g. it attached mid-GOP and
-            // periodic keyframes are off) — force an IDR on the next frame.
+            // periodic keyframes are off) — force an IDR now, not only on the
+            // next SCK frame. Static desktops otherwise leave Chromebook VDA
+            // green until the 1s idle watchdog.
             Log.info("phone requested keyframe")
             needsKeyframe = true
+            if let pixelBuffer = lastPixelBuffer {
+                encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
+            }
         case WireMessage.sleeping:
             // The device locked and is about to close on us. Hand the
             // session to the controller right away: it tears the virtual
