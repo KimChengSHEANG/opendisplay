@@ -76,10 +76,11 @@ enum MainWindow {
     static func show() {
         if window == nil {
             let w = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 440, height: 540),
-                styleMask: [.titled, .closable, .miniaturizable],
+                contentRect: NSRect(x: 0, y: 0, width: 560, height: 700),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered, defer: false)
             w.title = "OpenDisplay"
+            w.minSize = NSSize(width: 480, height: 560)
             w.contentView = NSHostingView(
                 rootView: ContentView(controller: SenderController.shared,
                                       updater: updater))
@@ -1513,7 +1514,7 @@ struct ContentView: View {
 
             Divider()
 
-            // Settings
+            // Settings — fills leftover height so the window can grow usefully.
             Form {
                 Section("Devices") {
                     if !controller.adbInstalled {
@@ -1633,9 +1634,7 @@ struct ContentView: View {
                 }
             }
             .formStyle(.grouped)
-            // Scrollable + fixed panel height: MenuBarExtra windows mis-measure
-            // grouped Forms (clipping on small displays), so size explicitly
-            // and let the form scroll when it doesn't fit.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Divider()
 
@@ -1659,7 +1658,10 @@ struct ContentView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
         }
-        .frame(width: 440, height: 540)
+        // Ideal size for MenuBarExtra + Dock window; min keeps layout usable,
+        // max infinity lets the Dock/background NSWindow grow when resized.
+        .frame(minWidth: 480, idealWidth: 560, maxWidth: .infinity,
+               minHeight: 560, idealHeight: 700, maxHeight: .infinity)
     }
 
     @ViewBuilder
