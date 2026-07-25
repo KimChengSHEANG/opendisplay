@@ -2,7 +2,7 @@
 # first (generate.sh reads DEVELOPMENT_TEAM from .env), then builds a scheme.
 #
 #   make mac              # build the macOS sender app
-#   make run              # build + launch Mac app
+#   make mac-run          # build + launch Mac app
 #   make ios              # build iOS receiver (simulator SDK, unsigned)
 #   make ios-device       # build iOS receiver for physical devices (signed)
 #   make ios-run          # build + install + launch on a connected iOS device
@@ -23,7 +23,7 @@ ANDROID_DIR = Android
 ANDROID_APK = $(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk
 ANDROID_PKG = com.peetzweg.opendisplay
 
-.PHONY: all mac ios ios-device ios-run android android-run run clean generate
+.PHONY: all mac ios ios-device ios-run android android-run mac-run clean generate
 
 all: mac ios android
 
@@ -52,7 +52,7 @@ android:
 
 # Kill any live instance so we don't reuse a stale process, pause briefly so
 # WindowServer can release the previous virtual-display serial, then open.
-run: mac
+mac-run: mac
 	@test -d "$(APP)" || (echo "Mac app missing at $(APP)"; exit 1)
 	-killall OpenDisplay 2>/dev/null
 	@sleep 0.3
