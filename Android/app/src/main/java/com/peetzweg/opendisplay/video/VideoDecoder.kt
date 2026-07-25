@@ -281,6 +281,13 @@ class VideoDecoder(
         if (Build.VERSION.SDK_INT >= 23) {
             format.setInteger(MediaFormat.KEY_PRIORITY, 0)
         }
+        // Desktop capture is full-range; without this ARC VDA often assumes
+        // limited-range and the Chromebook panel looks a notch too dark.
+        if (Build.VERSION.SDK_INT >= 24) {
+            format.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_FULL)
+            format.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
+            format.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+        }
         try {
             val c = createCodec()
             Log.i(TAG, "configure ${c.name} software=$preferSoftware")

@@ -332,6 +332,11 @@ class MainActivity : ComponentActivity() {
                 hostSleep.onConnected()
                 hostDisplayOff = hostSleep.hostDisplayOff
                 window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                // Chromebook ARC often leaves the ARC window below system
+                // brightness — pin full brightness while the stream owns the panel.
+                if (ReceiverSession.deviceKind(this@MainActivity) == "Chromebook") {
+                    setWindowBrightness(1f)
+                }
                 applyImmersive()
                 // Immersive + real panel size: re-announce if chrome changed
                 // the window metrics between listen and fullscreen.
@@ -348,6 +353,9 @@ class MainActivity : ComponentActivity() {
                 pendingSyncFrame = null
                 mainHandler.removeCallbacks(kfRetryRunnable)
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                if (ReceiverSession.deviceKind(this@MainActivity) == "Chromebook") {
+                    setWindowBrightness(null)
+                }
                 applyImmersive()
                 perf = PerfStats()
             }

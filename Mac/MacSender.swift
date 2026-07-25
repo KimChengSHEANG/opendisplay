@@ -24,9 +24,10 @@ enum CaptureMode: String {
     case extend   // virtual display (Milestone 2)
 }
 
-/// Capture-resolution / bitrate trade-off. The virtual display always runs at
-/// native size — only the captured/encoded stream is scaled, so lower presets
-/// cut encode, transmit, and decode time at the cost of sharpness.
+/// Capture-resolution / bitrate trade-off — exposed in the UI as **Sharpness**.
+/// The virtual display always runs at native size; only the captured/encoded
+/// stream is scaled, so lower presets cut encode, transmit, and decode time
+/// at the cost of sharpness.
 enum StreamQuality: String, CaseIterable, Identifiable {
     case best, balanced, fast
 
@@ -48,19 +49,35 @@ enum StreamQuality: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Chromebook panels are laptop-class (often 2400×1600); phone-tier bitrates
+    /// crush desktop text. Use a higher floor when encoding for Cheets.
+    func bitrate(forDeviceKind kind: String?) -> Int {
+        if kind == "Chromebook" {
+            switch self {
+            case .best: return 36_000_000
+            case .balanced: return 20_000_000
+            case .fast: return 12_000_000
+            }
+        }
+        return bitrate
+    }
+
     var label: String {
         switch self {
-        case .best: return "Best (native)"
-        case .balanced: return "Balanced (75%)"
-        case .fast: return "Fast (50%)"
+        case .best: return "Sharp"
+        case .balanced: return "Balanced"
+        case .fast: return "Soft"
         }
     }
 
     var explanation: String {
         switch self {
-        case .best: return "Pixel-perfect at the device's native resolution. Highest bandwidth and latency."
-        case .balanced: return "75% capture resolution — noticeably lower latency, slight softness."
-        case .fast: return "Half resolution — lowest latency and bandwidth, visibly softer. Good for WiFi."
+        case .best:
+            return "Full panel resolution and highest bitrate — sharpest text and UI."
+        case .balanced:
+            return "75% capture resolution — good sharpness with lower bandwidth and latency."
+        case .fast:
+            return "Half resolution — softest picture, lowest bandwidth. Best on weak WiFi."
         }
     }
 
@@ -140,9 +157,10 @@ enum DisplayResolution: String, CaseIterable, Identifiable {
 
     /// Sensible default when the user hasn't picked one yet.
     static func `default`(forDeviceKind kind: String?) -> DisplayResolution {
-        // Chromebook / large ARC windows are laptop-class panels — More Space
-        // gives usable desktop real estate without jumping to Extra Space.
-        if kind == "Chromebook" { return .moreSpace }
+        // Standard = 1:1 panel pixels (@2x). Chromebook used to default to
+        // More Space for desktop real estate, but that soft-scales on the
+        // receiver — sharp text wins; More/Extra Space remain available.
+        _ = kind
         return .standard
     }
 }
@@ -384,7 +402,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // SCDisplay reports points; capture at point resolution for M1.
             let captureW = (Int(Double(display.width) * quality.scale)) & ~1
             let captureH = (Int(Double(display.height) * quality.scale)) & ~1
-            encodeBitrate = quality.bitrate
+            encodeBitrate = quality.bitrate(forDeviceKind: lastHello?.device)
             encodeFrameRate = frameRatePreset.rawValue
             try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH,
                                    frameRate: frameRatePreset.rawValue)
@@ -534,9 +552,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let height = max(2, Int(Double(frameBufferHigh) * scale) & ~1)
         let panelPixels = Double(max(panelWide, 2) * max(panelHigh, 2))
         let capturePixels = Double(width * height)
+        let base = quality.bitrate(forDeviceKind: deviceKind)
         let bitrate = max(
-            quality.bitrate / 4,
-            Int((Double(quality.bitrate) * capturePixels / panelPixels).rounded())
+            base / 4,
+            Int((Double(base) * capturePixels / panelPixels).rounded())
         )
         return (width, height, bitrate, fps)
     }
@@ -615,11 +634,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // phones stay near 60 via a 120 request.
         let askRate = max(frameRate * 2, frameRate + 15)
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(askRate))
-        // 420v matches the encoder's native input — skips a BGRA→YUV conversion
-        // inside VideoToolbox. (`-pixfmt bgra` reverts for A/B testing.)
-        config.pixelFormat = UserDefaults.standard.string(forKey: "pixfmt") == "bgra"
-            ? kCVPixelFormatType_32BGRA
-            : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        // Desktop pixels are full-range. Video-range (16–235) 420v remaps them
+        // into a narrower luma band — Chromebook looks slightly dark/muddy.
+        // Full-range 420f keeps 0–255; `-pixfmt bgra` / `-pixfmt 420v` for A/B.
+        let pixfmt = UserDefaults.standard.string(forKey: "pixfmt")
+        config.pixelFormat = switch pixfmt {
+        case "bgra": kCVPixelFormatType_32BGRA
+        case "420v": kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        default: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        }
         // Shallow queue: depth 8 buffered ~8 stale frames on idle→wake bursts
         // (first encoded frame was the oldest). 3 covers keyframe-replay hold +
         // one in-flight encode without multi-frame lag.
@@ -709,6 +732,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Declare the device gone and end the session (must be called on `queue`).
     private func reportGone(_ reason: String) {
         guard !goneReported, !stopped else { return }
+        // Waiting for an Android/Chromebook app reopen — keep dialing; the
+        // controller only ends these when the user disconnects.
+        if awaitingWake {
+            Log.info("\(reason) — ignored (awaiting wake)")
+            return
+        }
         goneReported = true
         Log.info(reason)
         Task { @MainActor in self.onDisconnected?() }
@@ -718,7 +747,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// that has streamed before, enough refusals in a row prove the receiver
     /// app is gone — end now instead of waiting out the grace.
     private func dialRefused() {
-        guard everConnected, !stopped else { return }
+        guard everConnected, !stopped, !awaitingWake else { return }
         consecutiveRefusals += 1
         if consecutiveRefusals >= refusalsBeforeGivingUp {
             reportGone("dial refused \(consecutiveRefusals)x — receiver app is gone, ending session")
@@ -734,7 +763,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     func peerServiceWithdrawn() {
         queue.async { [weak self] in
             guard let self, !self.stopped, self.everConnected,
-                  !self.connectionReady else { return }
+                  !self.connectionReady, !self.awaitingWake else { return }
             self.reportGone("service withdrawn and connection down — receiver app is gone, ending session")
         }
     }
@@ -824,7 +853,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("connection ready to \(endpointName)")
         connectionReady = true
         everConnected = true
-        awaitingWake = false
+        // Keep `awaitingWake` until hello — ADB forward can report TCP ready
+        // then RST when the receiver app isn't listening yet; clearing the
+        // flag here let the 10s grace kill Chromebook reconnects.
         consecutiveRefusals = 0
         disconnectedSince = nil
         needsKeyframe = true   // new peer needs SPS/PPS + IDR
@@ -950,7 +981,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func scheduleReconnect() {
         guard !stopped else { return }
-        if everConnected {
+        if everConnected, !awaitingWake {
             if let since = disconnectedSince {
                 if Date().timeIntervalSince(since) > disconnectGraceSeconds {
                     reportGone("device gone for >\(Int(disconnectGraceSeconds))s — ending session")
@@ -1022,7 +1053,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // changes state — a dial stuck in .preparing (withdrawn Bonjour
             // service) would keep a dead session's display up forever.
             // Enforce it from here too, where the clock always ticks.
-            if !self.connectionReady, self.everConnected,
+            if !self.connectionReady, self.everConnected, !self.awaitingWake,
                let since = self.disconnectedSince,
                Date().timeIntervalSince(since) > self.disconnectGraceSeconds {
                 self.reportGone("device gone for >\(Int(self.disconnectGraceSeconds))s — ending session")
@@ -1167,6 +1198,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if let info = try? JSONDecoder().decode(PhoneInfo.self, from: payload) {
                 let previous = lastHello
                 lastHello = info
+                awaitingWake = false
                 Task { @MainActor in self.onHello?(info) }
                 // Version handshake (issue #132). Reply with our identity, and
                 // if the receiver is below the version we support, tell it to
@@ -1295,8 +1327,24 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 60 as CFNumber)
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_AverageBitRate, value: encodeBitrate as CFNumber)
+        // Allow short peaks above the average so sharp text/UI doesn't get
+        // crushed when the desktop is busy (bytes, not bits).
+        let peakBytes = Int64(Double(encodeBitrate) * 1.5 / 8.0)
+        let limits: [CFNumber] = [1 as CFNumber, peakBytes as CFNumber]
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: encodeFrameRate as CFNumber)
-        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
+        // Tag Rec.709 full-range so Android VDA doesn't treat desktop luma as
+        // limited-range (another source of a darker Chromebook panel).
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ColorPrimaries,
+                             value: kCVImageBufferColorPrimaries_ITU_R_709_2)
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_TransferFunction,
+                             value: kCVImageBufferTransferFunction_ITU_R_709_2)
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_YCbCrMatrix,
+                             value: kCVImageBufferYCbCrMatrix_ITU_R_709_2)
+        // Best: spend encode time on quality (Chromebook desktop text). Fast /
+        // Balanced keep the speed bias for latency on weaker links.
+        let speedOverQuality: CFBoolean = (quality == .best) ? kCFBooleanFalse : kCFBooleanTrue
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: speedOverQuality)
         VTCompressionSessionPrepareToEncodeFrames(encoder)
         Log.info("encoder ready: \(width)x\(height) H.264 \(encodeBitrate / 1_000_000)Mbps@\(encodeFrameRate)fps quality=\(quality.rawValue) lowLatencyRC=\(lowLatency)")
     }

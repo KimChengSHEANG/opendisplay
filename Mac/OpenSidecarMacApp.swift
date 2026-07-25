@@ -203,7 +203,7 @@ final class SenderController: ObservableObject {
         UserDefaults.standard.dictionary(forKey: "resolutionByDevice") as? [String: String] ?? [:] {
         didSet { UserDefaults.standard.set(resolutionByDevice, forKey: "resolutionByDevice") }
     }
-    /// Per-device bandwidth preset (`StreamQuality` raw value).
+    /// Per-device sharpness preset (`StreamQuality` raw value).
     @Published private var qualityByDevice: [String: String] =
         UserDefaults.standard.dictionary(forKey: "qualityByDevice") as? [String: String] ?? [:] {
         didSet { UserDefaults.standard.set(qualityByDevice, forKey: "qualityByDevice") }
@@ -527,14 +527,26 @@ final class SenderController: ObservableObject {
         }
         // Android over a physical USB cable (adb serial without host:port):
         // prefer migrating a live WiFi session onto the forward tunnel; else
-        // auto-connect. Network `adb connect` peers are left alone here —
-        // Bonjour WiFi is the right auto path for those (Chromebooks).
-        for device in androidDevices where device.authorized && !device.isNetwork {
+        // auto-connect. Chromebooks often stream over `adb connect` (no real
+        // USB gadget) — auto-dial those too when Bonjour isn't covering them
+        // (wifiDisabled or not advertising yet).
+        for device in androidDevices where device.authorized {
+            if device.isNetwork && !device.isChromebook { continue }
             let target = ConnectionTarget.androidUsb(serial: device.serial)
             if let covering = activeSession(coveringAndroid: device.serial) {
-                upgradeToAndroidUSB(covering, serial: device.serial)
+                if !device.isNetwork { upgradeToAndroidUSB(covering, serial: device.serial) }
             } else if !adbDisabled.contains(target.sessionID),
                       session(for: target.sessionID) == nil {
+                // Prefer Bonjour when the Chromebook is advertising and not
+                // opted out — avoid racing a WiFi auto-connect with ADB.
+                if device.isNetwork,
+                   let result = discovered.first(where: { sameAndroidDevice($0, serial: device.serial) }),
+                   let name = serviceName(of: result),
+                   !wifiDisabled.contains(ConnectionTarget.wifi(result).sessionID),
+                   !wifiDisabled.contains("wifi:\(name)") {
+                    continue
+                }
+                Log.info("auto-connect ADB \(target.sessionID)\(device.isNetwork ? " (network)" : "")")
                 connect(to: target)
             }
         }
@@ -586,21 +598,24 @@ final class SenderController: ObservableObject {
         hostDormant = false
         let targets = pendingWakeTargets
         pendingWakeTargets.removeAll()
-        guard !targets.isEmpty else {
+        if targets.isEmpty {
             Log.info("host usable — nothing pending")
-            return
-        }
-        Log.info("host usable — reconnecting \(targets.count) session(s)")
-        for target in targets {
-            // If the announce-then-end from `hostBecameDormant` hasn't landed
-            // yet, the old session is still parked in `sessions` and would
-            // make `connect` no-op below — force-end it first.
-            if let lingering = session(for: target.sessionID) {
-                Log.info("host usable — ending lingering session \(lingering.id) before wake reconnect")
-                end(lingering)
+        } else {
+            Log.info("host usable — reconnecting \(targets.count) session(s)")
+            for target in targets {
+                // If the announce-then-end from `hostBecameDormant` hasn't landed
+                // yet, the old session is still parked in `sessions` and would
+                // make `connect` no-op below — force-end it first.
+                if let lingering = session(for: target.sessionID) {
+                    Log.info("host usable — ending lingering session \(lingering.id) before wake reconnect")
+                    end(lingering)
+                }
+                connect(to: refreshed(target), awaitingWake: true)
             }
-            connect(to: refreshed(target), awaitingWake: true)
         }
+        // Browse/ADB callbacks that fired while locked were ignored — pick up
+        // Chromebooks (and anything else) that appeared during dormancy.
+        autoConnect()
     }
 
     /// Prefer a live Bonjour result after a long sleep; USB targets are stable.
@@ -797,7 +812,7 @@ final class SenderController: ObservableObject {
         session.deviceID ?? session.id
     }
 
-    // MARK: - Per-device stream prefs (resolution / bandwidth / fps / cursor)
+    // MARK: - Per-device stream prefs (resolution / sharpness / fps / cursor)
 
     func resolution(for session: DeviceSession) -> DisplayResolution {
         resolvedResolution(keys: [devicePrefKey(for: session)], kind: session.deviceKind)
@@ -957,7 +972,7 @@ final class SenderController: ObservableObject {
     private func resolvedQuality(keys: [String], kind: String?) -> StreamQuality {
         for key in keys {
             if let raw = qualityByDevice[key], let value = StreamQuality(rawValue: raw) {
-                // Fast on Chromebook is unreadably soft; bump to Balanced.
+                // Soft on Chromebook is unreadably soft; bump to Balanced.
                 if kind == "Chromebook" && value == .fast { return .balanced }
                 return value
             }
@@ -1559,13 +1574,13 @@ struct ContentView: View {
                 .onChange(of: controller.mode) { controller.restartAll() }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Picker("Default bandwidth", selection: $controller.quality) {
+                    Picker("Default sharpness", selection: $controller.quality) {
                         ForEach(StreamQuality.allCases) { q in
                             Text(q.label).tag(q)
                         }
                     }
                     .onChange(of: controller.quality) { controller.restartAll() }
-                    Text("Used when a device has no Bandwidth override. \(controller.quality.explanation)")
+                    Text("Used when a device has no Sharpness override. \(controller.quality.explanation)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1763,7 +1778,7 @@ struct SessionRow: View {
     }
 }
 
-/// Per-device Resolution / Bandwidth / Frame rate / Local cursor pickers.
+/// Per-device Resolution / Sharpness / Frame rate / Local cursor pickers.
 struct DeviceStreamSettings: View {
     let controller: SenderController
     var session: DeviceSession?
@@ -1834,8 +1849,8 @@ struct DeviceStreamSettings: View {
                     }
                 }
             }
-            settingRow("Bandwidth") {
-                Picker("Bandwidth", selection: quality) {
+            settingRow("Sharpness") {
+                Picker("Sharpness", selection: quality) {
                     ForEach(StreamQuality.allCases) { option in
                         Text(option.label).tag(option)
                     }
