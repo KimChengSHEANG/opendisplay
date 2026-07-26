@@ -321,6 +321,12 @@ private fun handleHover(
             val samples = pointerSamples(event, pointerIndex = 0)
             if (samples.isEmpty()) return true
             val last = samples.last()
+            // Hover means the button is up. If ChromeOS dropped ACTION_UP,
+            // pointerDown stays true → down() becomes a no-op and every move
+            // is injected as a drag — display looks frozen, clicks die.
+            // (A second ACTION_HOVER_ENTER branch used to call ensureReleased
+            // but was unreachable because this case matched first.)
+            forwarder.ensureReleased(last.first, last.second, width, height)
             moveLocalCursor(cursor, last.first, last.second, width, height)
             if (hoverMac != null) {
                 hoverMac.onHover(last.first, last.second, width, height)
@@ -331,18 +337,9 @@ private fun handleHover(
         }
         MotionEvent.ACTION_HOVER_EXIT -> {
             hoverMac?.flush()
+            // Leaving the surface mid-click also drops UP on some ARC builds.
+            forwarder.ensureReleased(event.x, event.y, width, height)
             cursor.endLocalDrive()
-            return true
-        }
-        MotionEvent.ACTION_HOVER_ENTER -> {
-            // After a click ChromeOS returns to hover; if ACTION_UP was dropped
-            // the Mac still has the button down — release before resume moves.
-            val samples = pointerSamples(event, pointerIndex = 0)
-            if (samples.isNotEmpty()) {
-                val last = samples.last()
-                forwarder.ensureReleased(last.first, last.second, width, height)
-                moveLocalCursor(cursor, last.first, last.second, width, height)
-            }
             return true
         }
     }

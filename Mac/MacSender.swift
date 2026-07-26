@@ -1700,7 +1700,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         pendingSends += 1
         connection.send(content: frame, completion: .contentProcessed { [weak self] error in
             guard let self else { return }
-            self.pendingSends -= 1
+            self.pendingSends = max(0, self.pendingSends - 1)
             if let error {
                 Log.info("send error: \(error)")
                 return

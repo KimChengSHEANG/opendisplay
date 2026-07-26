@@ -202,6 +202,24 @@ class InputForwarderTest {
     }
 
     @Test
+    fun ensureReleased_unsticksDownSoNextClickCanBegin() {
+        val sent = mutableListOf<Map<String, Any>>()
+        val forwarder = InputForwarder { sent += it }
+
+        // ChromeOS: BUTTON_PRESS, then UP dropped, then HOVER.
+        forwarder.down(10f, 10f, 100, 100)
+        forwarder.ensureReleased(15f, 15f, 100, 100)
+        // Without ensureReleased, this second down would be a no-op.
+        forwarder.down(40f, 40f, 100, 100)
+        forwarder.up(40f, 40f, 100, 100)
+
+        assertEquals(
+            listOf("began", "ended", "began", "ended"),
+            sent.map { it["phase"] },
+        )
+    }
+
+    @Test
     fun up_withoutDown_isNoOp() {
         val sent = mutableListOf<Map<String, Any>>()
         val forwarder = InputForwarder { sent += it }
