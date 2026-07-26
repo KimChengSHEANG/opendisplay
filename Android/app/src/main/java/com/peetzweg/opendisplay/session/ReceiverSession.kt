@@ -8,6 +8,7 @@ import java.io.IOException
 import java.io.OutputStream
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
@@ -143,6 +144,37 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     fun sendControl(map: Map<String, Any>) {
         val stamped = SessionTelemetry.stampTouch(map, nowMs(), clockOffsetMs)
         sendFrame(JSONObject(stamped).toString().toByteArray(Charsets.UTF_8))
+    }
+
+    /**
+     * Like [sendControl], but blocks until the write flushes (or [timeoutMs]
+     * elapses). Used before tearing the socket down for `sleeping` / `closing`
+     * so the Mac sees the announce and arms wake-reconnect — mirrors iOS
+     * `closeSession` sending before cancel.
+     */
+    fun sendControlSync(map: Map<String, Any>, timeoutMs: Long = 1_000) {
+        if (outputStream == null) return
+        val stamped = SessionTelemetry.stampTouch(map, nowMs(), clockOffsetMs)
+        val framed = FrameCodec.encode(JSONObject(stamped).toString().toByteArray(Charsets.UTF_8))
+        val done = CountDownLatch(1)
+        writeExecutor.execute {
+            synchronized(writeLock) {
+                val stream = outputStream
+                if (stream != null) {
+                    try {
+                        stream.write(framed)
+                        stream.flush()
+                    } catch (_: IOException) {
+                    }
+                }
+            }
+            done.countDown()
+        }
+        try {
+            done.await(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
     }
 
     fun updatePanel(wide: Int, high: Int, newScale: Double) {

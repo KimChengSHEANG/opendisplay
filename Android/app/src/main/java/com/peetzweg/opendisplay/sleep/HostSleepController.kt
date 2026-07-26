@@ -15,10 +15,12 @@ import com.peetzweg.opendisplay.wire.WireMessage
  *   [PanelBacklight] / `Settings.System.SCREEN_BRIGHTNESS`.
  * - [onConnected]/[wake] ~ `endHostDisplayOff`: a fresh connection, or the
  *   user tapping the blanked panel, undoes the blank (brightness restored).
- * - [onDeviceWillLock]/[onDeviceUnlocked] ~ `deviceWillLock`/`sceneDidActivate`:
- *   the *phone* locked, so nobody can see the stream — announce `sleeping`
- *   and stop accepting connections until unlock, or a Mac reconnect attempt
- *   would rebuild the display before anyone can see it.
+ * - [onDeviceWillLock]/[onDeviceUnlocked] ~ screen-off / unlock (or
+ *   `deviceWillLock`/`sceneDidActivate` on iOS): the panel went dark, so
+ *   nobody can see the stream — announce `sleeping` and stop accepting until
+ *   the screen is back, or a Mac reconnect would rebuild the display before
+ *   anyone can see it. Chromebooks often have no Android keyguard, so this
+ *   is driven by `ACTION_SCREEN_OFF` / `ACTION_SCREEN_ON`, not lock alone.
  * - [onAppQuitting] ~ `appWillTerminate`: announce `closing` so the Mac ends
  *   the session immediately instead of waiting out its silence grace.
  */
