@@ -9,8 +9,10 @@ import com.peetzweg.opendisplay.wire.WireMessage
  * lifecycle to the callbacks below. Mirrors `PhoneReceiver.swift`:
  *
  * - [onHostSleeping] ~ `beginHostDisplayOff`: the Mac's own display slept or
- *   locked — blank this panel (black UI + brightness 0) but **keep
+ *   locked — blank this panel (black UI + brightness ~10%) but **keep
  *   listening**; the Mac owns the reconnect and may dial back in any moment.
+ *   On Chromebook, that level also drives the ChromeOS panel backlight via
+ *   [PanelBacklight] / `Settings.System.SCREEN_BRIGHTNESS`.
  * - [onConnected]/[wake] ~ `endHostDisplayOff`: a fresh connection, or the
  *   user tapping the blanked panel, undoes the blank (brightness restored).
  * - [onDeviceWillLock]/[onDeviceUnlocked] ~ `deviceWillLock`/`sceneDidActivate`:
@@ -36,7 +38,7 @@ class HostSleepController(
     fun onHostSleeping() {
         hostDisplayOff = true
         setKeepScreenOn(false)
-        setBrightness(0f)
+        setBrightness(HOST_SLEEP_BRIGHTNESS)
     }
 
     fun onConnected() = wake()
@@ -63,5 +65,10 @@ class HostSleepController(
 
     fun onAppQuitting() {
         sendControl(mapOf("type" to WireMessage.closing))
+    }
+
+    companion object {
+        /** Dim level while the Mac display is off — 10%, not fully black. */
+        const val HOST_SLEEP_BRIGHTNESS = 0.10f
     }
 }

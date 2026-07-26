@@ -36,7 +36,7 @@ class HostSleepControllerTest {
         controller.onHostSleeping()
 
         assertTrue(controller.hostDisplayOff)
-        assertEquals(listOf(0f), brightnessCalls)
+        assertEquals(listOf(HostSleepController.HOST_SLEEP_BRIGHTNESS), brightnessCalls)
         assertEquals(listOf(false), keepScreenOnCalls)
         assertEquals(0, acceptingStopped)
         assertTrue(sent.isEmpty())
@@ -48,7 +48,7 @@ class HostSleepControllerTest {
         controller.onConnected()
 
         assertFalse(controller.hostDisplayOff)
-        assertEquals(listOf(0f, null), brightnessCalls)
+        assertEquals(listOf(HostSleepController.HOST_SLEEP_BRIGHTNESS, null), brightnessCalls)
     }
 
     @Test
@@ -65,7 +65,7 @@ class HostSleepControllerTest {
         controller.wake()
 
         assertFalse(controller.hostDisplayOff)
-        assertEquals(listOf(0f, null), brightnessCalls)
+        assertEquals(listOf(HostSleepController.HOST_SLEEP_BRIGHTNESS, null), brightnessCalls)
     }
 
     @Test

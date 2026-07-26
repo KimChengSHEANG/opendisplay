@@ -37,6 +37,7 @@ import com.peetzweg.opendisplay.session.SessionTelemetry
 import com.peetzweg.opendisplay.settings.AppSettings
 import com.peetzweg.opendisplay.settings.ConnectionMode
 import com.peetzweg.opendisplay.sleep.HostSleepController
+import com.peetzweg.opendisplay.sleep.PanelBacklight
 import com.peetzweg.opendisplay.ui.CursorController
 import com.peetzweg.opendisplay.ui.IdleScreen
 import com.peetzweg.opendisplay.ui.PerfOverlay
@@ -101,17 +102,21 @@ class MainActivity : ComponentActivity() {
     private var forcedReconnectsWindow = 0
     private var forcedReconnectsWindowStartMs: Long = 0
     private var advertiser: DiscoveryAdvertiser? = null
-    private var savedBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
     private var lockReceiverRegistered = false
     /** True between [onStart] and [onStop]; gates [resumeAccepting] while backgrounded. */
     private var activityStarted = false
     /** Set when unlock arrives before the activity is visible again. */
     private var pendingResumeAccepting = false
 
+    private val isChromebook: Boolean
+        get() = ReceiverSession.deviceKind(this) == "Chromebook"
+
+    private lateinit var panelBacklight: PanelBacklight
+
     /** Wires Android window/lock/session APIs to the pure sleep state machine — see `HostSleepController`. */
     private val hostSleep = HostSleepController(
         sendControl = { session?.sendControl(it) },
-        setBrightness = { value -> setWindowBrightness(value) },
+        setBrightness = { value -> panelBacklight.set(value) },
         setKeepScreenOn = { keep ->
             if (keep) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -144,6 +149,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        panelBacklight = PanelBacklight(
+            window = window,
+            context = this,
+            chromebook = isChromebook,
+        )
         WindowCompat.setDecorFitsSystemWindows(window, false)
         deviceName = DiscoveryAdvertiser.deviceName(this)
         showAnalytics = AppSettings.showAnalytics(this)
@@ -365,17 +375,6 @@ class MainActivity : ComponentActivity() {
         if (hasFocus) applyImmersive()
     }
 
-    private fun setWindowBrightness(value: Float?) {
-        val attrs = window.attributes
-        if (value == null) {
-            attrs.screenBrightness = savedBrightness
-        } else {
-            savedBrightness = attrs.screenBrightness
-            attrs.screenBrightness = value
-        }
-        window.attributes = attrs
-    }
-
     private inner class ReceiverListener : ReceiverSession.Listener {
         override fun onConnected() {
             runOnUiThread {
@@ -385,8 +384,8 @@ class MainActivity : ComponentActivity() {
                 window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 // Chromebook ARC often leaves the ARC window below system
                 // brightness — pin full brightness while the stream owns the panel.
-                if (ReceiverSession.deviceKind(this@MainActivity) == "Chromebook") {
-                    setWindowBrightness(1f)
+                if (isChromebook) {
+                    panelBacklight.pinFull()
                 }
                 applyImmersive()
                 // Immersive + real panel size: re-announce if chrome changed
@@ -405,8 +404,10 @@ class MainActivity : ComponentActivity() {
                 mainHandler.removeCallbacks(recoverRunnable)
                 recoverAttempt = 0
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                if (ReceiverSession.deviceKind(this@MainActivity) == "Chromebook") {
-                    setWindowBrightness(null)
+                // Mac parks the session after hostSleeping — keep the Chromebook
+                // backlight dimmed until reconnect or the user taps the blank panel.
+                if (isChromebook && !hostSleep.hostDisplayOff) {
+                    panelBacklight.set(null)
                 }
                 applyImmersive()
                 perf = PerfStats()
