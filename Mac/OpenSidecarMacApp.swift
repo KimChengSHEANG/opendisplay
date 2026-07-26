@@ -1,6 +1,7 @@
 import SwiftUI
 import Network
 import Combine
+import ServiceManagement
 import Sparkle
 
 /// How the Mac finds receivers — mirrors Android `ConnectionMode`.
@@ -83,6 +84,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if presentation != .menuBar {
             MainWindow.show()
         }
+        // Register as a Login Item when preferred so the helper is back after reboot.
+        SenderController.shared.syncOpenAtLoginPreference()
     }
 
     // Background/Dock modes: opening the app again (Spotlight, Finder, Dock
@@ -219,6 +222,13 @@ final class SenderController: ObservableObject {
             if presentation != .menuBar { MainWindow.show() }
         }
     }
+
+    /// Launch at login via `SMAppService.mainApp`. Distinct from the
+    /// `autostart` defaults key, which only gates auto-connecting devices.
+    @Published var openAtLogin = false
+    /// True when macOS registered the item but the user still needs to allow
+    /// it under System Settings → General → Login Items.
+    @Published var openAtLoginNeedsApproval = false
 
     @Published var sessions: [DeviceSession] = []
     @Published var discovered: [NWBrowser.Result] = []
@@ -387,6 +397,51 @@ final class SenderController: ObservableObject {
         // the edge-only callback for it.
         if hostSleepObserver.isDormant {
             hostDormant = true
+        }
+    }
+
+    // MARK: - Open at Login
+
+    /// New installs default on; otherwise re-apply a saved preference or sync UI.
+    func syncOpenAtLoginPreference() {
+        if UserDefaults.standard.object(forKey: "openAtLogin") == nil {
+            // Menu-bar helper: come back after reboot so remembered devices reconnect.
+            setOpenAtLogin(true)
+            return
+        }
+        if UserDefaults.standard.bool(forKey: "openAtLogin"),
+           SMAppService.mainApp.status == .notRegistered {
+            setOpenAtLogin(true)
+            return
+        }
+        refreshOpenAtLoginStatus()
+    }
+
+    func setOpenAtLogin(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: "openAtLogin")
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else if SMAppService.mainApp.status != .notRegistered {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            Log.info("Open at Login \(enabled ? "enable" : "disable") failed: \(error.localizedDescription)")
+        }
+        refreshOpenAtLoginStatus()
+    }
+
+    func refreshOpenAtLoginStatus() {
+        switch SMAppService.mainApp.status {
+        case .enabled:
+            openAtLogin = true
+            openAtLoginNeedsApproval = false
+        case .requiresApproval:
+            openAtLogin = true
+            openAtLoginNeedsApproval = true
+        default:
+            openAtLogin = false
+            openAtLoginNeedsApproval = false
         }
     }
 
@@ -1858,6 +1913,23 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Open at Login", isOn: Binding(
+                        get: { controller.openAtLogin },
+                        set: { controller.setOpenAtLogin($0) }
+                    ))
+                    if controller.openAtLoginNeedsApproval {
+                        Text("Waiting for approval in System Settings → General → Login Items.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Start OpenDisplay automatically when you log in to this Mac.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .onAppear { controller.refreshOpenAtLoginStatus() }
 
                 LabeledContent("Display layout") {
                     Button("Arrange Displays…") {
