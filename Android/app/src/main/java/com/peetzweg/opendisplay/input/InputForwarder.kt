@@ -32,13 +32,19 @@ class InputForwarder(private val send: (Map<String, Any>) -> Unit) {
     private var lastNormY = 0.5
     private var lastMoveX = Float.NaN
     private var lastMoveY = Float.NaN
+    /** True between [down] and [up]/[cancel]/[ensureReleased]. */
+    private var pointerDown = false
 
     /** First finger touches down. */
     fun down(x: Float, y: Float, width: Int, height: Int) {
+        // ChromeOS may deliver both ACTION_DOWN and ACTION_BUTTON_PRESS —
+        // only the first counts so we don't inject a double-click.
+        if (pointerDown) return
         twoFingerActive = false
         multiTouchOccurred = false
         lastMoveX = Float.NaN
         lastMoveY = Float.NaN
+        pointerDown = true
         touch("began", x, y, width, height)
     }
 
@@ -96,8 +102,11 @@ class InputForwarder(private val send: (Map<String, Any>) -> Unit) {
         if (twoFingerActive || multiTouchOccurred) {
             twoFingerActive = false
             multiTouchOccurred = false
+            pointerDown = false
             return
         }
+        if (!pointerDown) return
+        pointerDown = false
         lastMoveX = Float.NaN
         lastMoveY = Float.NaN
         touch("ended", x, y, width, height)
@@ -109,7 +118,20 @@ class InputForwarder(private val send: (Map<String, Any>) -> Unit) {
         multiTouchOccurred = false
         lastMoveX = Float.NaN
         lastMoveY = Float.NaN
+        if (!pointerDown) return
+        pointerDown = false
         touch("cancelled", x, y, width, height)
+    }
+
+    /**
+     * Chromebook mouse: after a click the stream returns to hover. If
+     * ACTION_UP was dropped, the Mac is left with the button held and every
+     * subsequent hover becomes a drag — clicks look dead until reconnect.
+     * Call on HOVER_ENTER to release a stale down.
+     */
+    fun ensureReleased(x: Float, y: Float, width: Int, height: Int) {
+        if (!pointerDown) return
+        up(x, y, width, height)
     }
 
     /**
@@ -123,6 +145,7 @@ class InputForwarder(private val send: (Map<String, Any>) -> Unit) {
         }
         twoFingerActive = true
         multiTouchOccurred = true
+        pointerDown = false
         lastFocusX = focusX
         lastFocusY = focusY
         lastMoveX = Float.NaN

@@ -172,4 +172,40 @@ class InputForwarderTest {
         forwarder.wheel(0f, 0f)
         assertEquals(0, sent.size)
     }
+
+    @Test
+    fun ensureReleased_sendsEndedOnlyWhenDown() {
+        val sent = mutableListOf<Map<String, Any>>()
+        val forwarder = InputForwarder { sent += it }
+
+        forwarder.ensureReleased(10f, 10f, 100, 100)
+        assertEquals(0, sent.size)
+
+        forwarder.down(10f, 10f, 100, 100)
+        forwarder.ensureReleased(20f, 20f, 100, 100)
+
+        assertEquals(listOf("began", "ended"), sent.map { it["phase"] })
+        assertEquals(0.2, sent[1]["x"])
+        assertEquals(0.2, sent[1]["y"])
+    }
+
+    @Test
+    fun down_isIdempotentWhileAlreadyDown() {
+        val sent = mutableListOf<Map<String, Any>>()
+        val forwarder = InputForwarder { sent += it }
+
+        forwarder.down(10f, 10f, 100, 100)
+        forwarder.down(50f, 50f, 100, 100)
+        forwarder.up(50f, 50f, 100, 100)
+
+        assertEquals(listOf("began", "ended"), sent.map { it["phase"] })
+    }
+
+    @Test
+    fun up_withoutDown_isNoOp() {
+        val sent = mutableListOf<Map<String, Any>>()
+        val forwarder = InputForwarder { sent += it }
+        forwarder.up(10f, 10f, 100, 100)
+        assertEquals(0, sent.size)
+    }
 }

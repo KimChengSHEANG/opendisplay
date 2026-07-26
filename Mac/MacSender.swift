@@ -1187,13 +1187,56 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - Control messages (phone -> Mac)
 
     private func receiveControl(on conn: NWConnection) {
-        conn.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, _, error in
-            guard let self, error == nil, let data, data.count == 4 else { return }
+        // Must re-arm or reconnect on every completion. A silent `return` here
+        // used to stop reading control forever while video still flowed —
+        // Chromebook local cursor kept moving, but clicks never reached the Mac
+        // until a manual reconnect.
+        conn.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, isComplete, error in
+            guard let self, !self.stopped, self.connection === conn else { return }
+            if let error {
+                Log.info("control receive error: \(error)")
+                self.scheduleReconnect()
+                return
+            }
+            if isComplete {
+                Log.info("control receive complete — peer closed")
+                self.scheduleReconnect()
+                return
+            }
+            guard let data, data.count == 4 else {
+                Log.info("control length framing incomplete — reconnecting")
+                self.scheduleReconnect()
+                return
+            }
             let len = Int(UInt32(bigEndian: data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }))
-            guard len > 0, len < 1 << 20 else { return }
-            conn.receive(minimumIncompleteLength: len, maximumLength: len) { [weak self] payload, _, _, error in
-                guard let self, error == nil, let payload, payload.count == len else { return }
-                self.handleControl(payload)
+            guard len > 0, len < 1 << 20 else {
+                Log.info("control length out of range (\(len)) — reconnecting")
+                self.scheduleReconnect()
+                return
+            }
+            conn.receive(minimumIncompleteLength: len, maximumLength: len) { [weak self] payload, _, isComplete, error in
+                guard let self, !self.stopped, self.connection === conn else { return }
+                if let error {
+                    Log.info("control payload receive error: \(error)")
+                    self.scheduleReconnect()
+                    return
+                }
+                if let payload, payload.count == len {
+                    self.handleControl(payload)
+                } else if isComplete {
+                    Log.info("control payload incomplete at EOF — reconnecting")
+                    self.scheduleReconnect()
+                    return
+                } else {
+                    Log.info("control payload incomplete — reconnecting")
+                    self.scheduleReconnect()
+                    return
+                }
+                if isComplete {
+                    Log.info("control stream ended after payload — reconnecting")
+                    self.scheduleReconnect()
+                    return
+                }
                 self.receiveControl(on: conn)
             }
         }

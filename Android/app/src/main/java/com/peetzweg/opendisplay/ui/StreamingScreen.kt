@@ -64,7 +64,14 @@ fun StreamingScreen(
                     )
                 }
             }
-            val cursorView = ImageView(context).apply {
+            val cursorView = object : ImageView(context) {
+                // Match iOS cursor `.allowsHitTesting(false)` — the sprite sits
+                // under the OS pointer and must never steal mouse clicks from
+                // the SurfaceView (ChromeOS hit-tests the overlay bounds).
+                override fun dispatchTouchEvent(event: MotionEvent): Boolean = false
+                override fun onHoverEvent(event: MotionEvent): Boolean = false
+                override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean = false
+            }.apply {
                 scaleType = ImageView.ScaleType.FIT_XY
                 if (chromebook) {
                     visibility = android.view.View.VISIBLE
@@ -327,6 +334,17 @@ private fun handleHover(
             cursor.endLocalDrive()
             return true
         }
+        MotionEvent.ACTION_HOVER_ENTER -> {
+            // After a click ChromeOS returns to hover; if ACTION_UP was dropped
+            // the Mac still has the button down — release before resume moves.
+            val samples = pointerSamples(event, pointerIndex = 0)
+            if (samples.isNotEmpty()) {
+                val last = samples.last()
+                forwarder.ensureReleased(last.first, last.second, width, height)
+                moveLocalCursor(cursor, last.first, last.second, width, height)
+            }
+            return true
+        }
     }
     return false
 }
@@ -390,22 +408,38 @@ private class HoverMacThrottle(
     }
 }
 
-/** Mouse wheel → Mac pixel scroll (same wire as two-finger pan). */
+/** Mouse wheel / button → Mac scroll or click (same wire as touch). */
 private fun handleGenericMotion(
     forwarder: InputForwarder,
     width: Int,
     height: Int,
     event: MotionEvent,
 ): Boolean {
-    if (event.actionMasked != MotionEvent.ACTION_SCROLL) return false
-    val v = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
-    val h = event.getAxisValue(MotionEvent.AXIS_HSCROLL)
-    if (v == 0f && h == 0f) return false
-    // Axis units are typically ±1 per notch; scale to video pixels like a
-    // short two-finger flick (~3–5% of the short edge).
-    val unit = minOf(width, height).coerceAtLeast(1) * 0.04f
-    forwarder.wheel(h * unit, -v * unit)
-    return true
+    when (event.actionMasked) {
+        MotionEvent.ACTION_SCROLL -> {
+            val v = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
+            val h = event.getAxisValue(MotionEvent.AXIS_HSCROLL)
+            if (v == 0f && h == 0f) return false
+            // Axis units are typically ±1 per notch; scale to video pixels like a
+            // short two-finger flick (~3–5% of the short edge).
+            val unit = minOf(width, height).coerceAtLeast(1) * 0.04f
+            forwarder.wheel(h * unit, -v * unit)
+            return true
+        }
+        // Some ARC builds deliver mouse buttons here and skip ACTION_DOWN/UP
+        // on the touch listener — without this, hover works but clicks die.
+        MotionEvent.ACTION_BUTTON_PRESS -> {
+            if (event.actionButton != MotionEvent.BUTTON_PRIMARY) return false
+            forwarder.down(event.x, event.y, width, height)
+            return true
+        }
+        MotionEvent.ACTION_BUTTON_RELEASE -> {
+            if (event.actionButton != MotionEvent.BUTTON_PRIMARY) return false
+            forwarder.up(event.x, event.y, width, height)
+            return true
+        }
+    }
+    return false
 }
 
 /**

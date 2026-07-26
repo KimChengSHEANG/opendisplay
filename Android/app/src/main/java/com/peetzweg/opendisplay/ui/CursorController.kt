@@ -17,7 +17,9 @@ import android.widget.ImageView
  * [android.view.PointerIcon] (on SurfaceView or a sibling hit layer), which
  * left the pointer invisible. Hover paints immediately via [moveLocal]; Mac
  * echo is ignored while driving locally. The view stays attached at alpha 0
- * so the first move never pays a GONE→VISIBLE hitch.
+ * so the first move never pays a GONE→VISIBLE hitch. The overlay must not
+ * receive hits (see StreamingScreen's pass-through ImageView) — it sits under
+ * the OS pointer and would otherwise steal clicks from the video surface.
  */
 class CursorController(private val chromebook: Boolean = false) {
     @Volatile private var host: View? = null

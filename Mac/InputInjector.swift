@@ -35,21 +35,30 @@ final class InputInjector {
             y: bounds.origin.y + y * bounds.height
         )
 
-        let type: CGEventType
         switch phase {
         case "began":
-            type = .leftMouseDown
+            // Chromebook mouse sometimes drops ACTION_UP (hover exit/enter
+            // races). A stuck isDown turns every hover into leftMouseDragged
+            // and clicks stop affecting the desktop until reconnect. Force an
+            // up before the new down so the session self-heals.
+            if isDown {
+                post(.leftMouseUp, at: point)
+                isDown = false
+            }
+            post(.leftMouseDown, at: point)
             isDown = true
         case "moved":
-            type = isDown ? .leftMouseDragged : .mouseMoved
+            post(isDown ? .leftMouseDragged : .mouseMoved, at: point)
         case "ended", "cancelled":
             guard isDown else { return }   // spurious up without a down
-            type = .leftMouseUp
+            post(.leftMouseUp, at: point)
             isDown = false
         default:
             return
         }
+    }
 
+    private func post(_ type: CGEventType, at point: CGPoint) {
         guard let event = CGEvent(mouseEventSource: source, mouseType: type,
                                   mouseCursorPosition: point, mouseButton: .left) else { return }
         event.setIntegerValueField(.mouseEventClickState, value: 1)
