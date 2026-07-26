@@ -42,6 +42,14 @@ struct PerfStats: Equatable {
     var decodeP50 = 0.0          // VTDecompressionSession decode, ms
     var photonP50 = 0.0          // Mac capture → frame actually on glass, ms
     var photonP95 = 0.0
+
+    /// Capture→glass estimate for the overlay: Metal photon when available,
+    /// otherwise wire e2e (cap→receive) + decode.
+    var totalLatencyP50: Double {
+        if photonP50 > 0 { return photonP50 }
+        if e2eP50 > 0 && decodeP50 > 0 { return e2eP50 + decodeP50 }
+        return e2eP50
+    }
 }
 
 final class PhoneReceiver: ObservableObject {

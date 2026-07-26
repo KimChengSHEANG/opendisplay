@@ -38,6 +38,9 @@ fun PerfOverlay(stats: PerfStats, modifier: Modifier = Modifier) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 TransportBadge(stats.transport)
+                if (stats.totalLatencyP50 > 0) {
+                    Metric("total", "${stats.totalLatencyP50.toInt()} ms")
+                }
                 if (stats.e2eP50 > 0) {
                     Metric("latency", "${stats.e2eP50.toInt()} ms")
                     Metric("p95", "${stats.e2eP95.toInt()} ms")

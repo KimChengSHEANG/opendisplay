@@ -25,7 +25,17 @@ data class PerfStats(
     val decodeP50: Double = 0.0,
     val decodeP95: Double = 0.0,
     val offsetKnown: Boolean = false,
-)
+) {
+    /**
+     * Capture→glass estimate for the overlay: wire e2e (cap→receive) plus
+     * decode→panel when both are known; otherwise e2e alone.
+     */
+    val totalLatencyP50: Double
+        get() = when {
+            e2eP50 > 0.0 && decodeP50 > 0.0 -> e2eP50 + decodeP50
+            else -> e2eP50
+        }
+}
 
 /**
  * Pure helpers shared by [ReceiverSession] and unit tests — clock sync,

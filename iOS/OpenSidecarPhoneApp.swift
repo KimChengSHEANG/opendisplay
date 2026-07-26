@@ -457,40 +457,45 @@ struct PerfOverlay: View {
                         in: Capsule())
             .foregroundStyle(.white)
 
+        // Total = capture→glass. Prefer Metal photon when available;
+        // otherwise wire e2e (cap→receive) + decode-to-panel.
+        if stats.totalLatencyP50 > 0 {
+            metric("total", String(format: "%.0f ms", stats.totalLatencyP50))
+        }
         if stats.e2eP50 > 0 {
             metric("latency", String(format: "%.0f ms", stats.e2eP50))
             metric("p95", String(format: "%.0f ms", stats.e2eP95))
             metric("encode", String(format: "%.0f ms", stats.encodeP50))
-            }
-            if stats.decodeP50 > 0 {
-                metric("decode", String(format: "%.1f ms", stats.decodeP50))
-            }
-            if stats.photonP50 > 0 {
-                // True capture→glass latency (Metal presented handler) —
-                // the only number that includes display vsync.
-                metric("photon", String(format: "%.0f ms", stats.photonP50))
-            }
-            if stats.inputP50 > 0 {
-                // touch→CGEvent on the Mac; full touch-to-photon adds
-                // the render+capture wait and one e2e on top.
-                metric("input", String(format: "%.0f ms", stats.inputP50))
-            }
-            metric("rtt", String(format: "%.0f ms", stats.rttMs))
-            metric("FPS", "\(stats.fps)")
-            if stats.capFps > 0 {
-                metric("Mac cap", "\(stats.capFps)")
-            }
-            metric("Mbit/s", String(format: "%.1f", stats.mbps))
-            metric("stalls", "\(stats.stalls)")
-            metric("enc↓", "\(stats.macEncDrops)")
-            metric("net↓", "\(stats.macNetDrops)")
-            if stats.macPending > 0 {
-                metric("queue", "\(stats.macPending)")
-            }
-            if stats.decodeFlushes > 0 {
-                metric("flushes", "\(stats.decodeFlushes)")
-            }
-            metric("res", "\(Int(videoSize.width))×\(Int(videoSize.height))")
+        }
+        if stats.decodeP50 > 0 {
+            metric("decode", String(format: "%.1f ms", stats.decodeP50))
+        }
+        if stats.photonP50 > 0 {
+            // True capture→glass latency (Metal presented handler) —
+            // the only number that includes display vsync.
+            metric("photon", String(format: "%.0f ms", stats.photonP50))
+        }
+        if stats.inputP50 > 0 {
+            // touch→CGEvent on the Mac; full touch-to-photon adds
+            // the render+capture wait and one e2e on top.
+            metric("input", String(format: "%.0f ms", stats.inputP50))
+        }
+        metric("rtt", String(format: "%.0f ms", stats.rttMs))
+        metric("FPS", "\(stats.fps)")
+        if stats.capFps > 0 {
+            metric("Mac cap", "\(stats.capFps)")
+        }
+        metric("Mbit/s", String(format: "%.1f", stats.mbps))
+        metric("stalls", "\(stats.stalls)")
+        metric("enc↓", "\(stats.macEncDrops)")
+        metric("net↓", "\(stats.macNetDrops)")
+        if stats.macPending > 0 {
+            metric("queue", "\(stats.macPending)")
+        }
+        if stats.decodeFlushes > 0 {
+            metric("flushes", "\(stats.decodeFlushes)")
+        }
+        metric("res", "\(Int(videoSize.width))×\(Int(videoSize.height))")
     }
 
     @ViewBuilder
