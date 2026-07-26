@@ -48,6 +48,7 @@ import com.peetzweg.opendisplay.ui.decodeCursorPng
 import com.peetzweg.opendisplay.version.VersionGate
 import com.peetzweg.opendisplay.video.VideoDecoder
 import com.peetzweg.opendisplay.wire.WireMessage
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : ComponentActivity() {
     private var connected by mutableStateOf(false)
@@ -71,10 +72,20 @@ class MainActivity : ComponentActivity() {
     /**
      * Chromebook post-connect recovery: keep asking for IDRs, then force the
      * Mac to redial if the panel never paints (solid green / blank VDA).
+     *
+     * ARC VDA allocate often takes >3s after screen wake; forcing a redial at
+     * ~2.5s orphans the in-flight allocate and wedges the decoder (black panel).
+     * Chromebook waits longer before tearing the socket.
      */
     private var recoverAttempt = 0
+    private val recoverScheduled = AtomicBoolean(false)
+    private val recoverIntervalMs: Long
+        get() = if (isChromebook) 1_000L else 500L
+    private val recoverForceAfterAttempts: Int
+        get() = if (isChromebook) 12 else 5
     private val recoverRunnable = object : Runnable {
         override fun run() {
+            recoverScheduled.set(false)
             val d = decoder ?: return
             if (session?.isConnected != true) return
             if (d.hasRendered) {
@@ -83,18 +94,31 @@ class MainActivity : ComponentActivity() {
             }
             recoverAttempt++
             session?.sendControl(mapOf("type" to "kf"))
-            if (recoverAttempt >= 5) {
-                // ~2.5s of no paint while connected — tear the socket so Mac
-                // reconnects with a fresh SurfaceView + IDR (no quality change).
+            if (recoverAttempt >= recoverForceAfterAttempts) {
+                // Phone ~2.5s / Chromebook ~12s of no paint — tear the socket so
+                // Mac reconnects with a fresh SurfaceView + IDR.
                 if (allowForcedReconnect()) {
                     session?.forcePeerReconnect("no video frame rendered after reconnect")
                 }
                 recoverAttempt = 0
                 return
             }
-            mainHandler.postDelayed(this, 500)
+            scheduleRecover(recoverIntervalMs)
         }
     }
+
+    /** Start/continue the no-paint recover loop (idempotent). */
+    private fun scheduleRecover(delayMs: Long = recoverIntervalMs) {
+        if (!recoverScheduled.compareAndSet(false, true)) return
+        mainHandler.postDelayed(recoverRunnable, delayMs)
+    }
+
+    private fun cancelRecover() {
+        mainHandler.removeCallbacks(recoverRunnable)
+        recoverScheduled.set(false)
+        recoverAttempt = 0
+    }
+
     /** Throttle decoder-driven keyframe asks so scroll doesn't IDR-spam. */
     private var lastDecoderKfAtMs: Long = 0
     /** Rate-limit forced TCP reconnects so a permanent failure can't loop. */
@@ -124,6 +148,7 @@ class MainActivity : ComponentActivity() {
             else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         },
         stopAccepting = {
+            cancelRecover()
             session?.stop()
             connected = false
         },
@@ -203,14 +228,12 @@ class MainActivity : ComponentActivity() {
                     if (pending != null) d.feedAnnexB(pending)
                     if (session?.isConnected == true) {
                         session?.sendControl(mapOf("type" to "kf"))
-                        mainHandler.removeCallbacks(recoverRunnable)
-                        recoverAttempt = 0
-                        mainHandler.postDelayed(recoverRunnable, 500)
+                        cancelRecover()
+                        scheduleRecover(recoverIntervalMs)
                     }
                 },
                 onSurfaceDestroyed = {
-                    mainHandler.removeCallbacks(recoverRunnable)
-                    recoverAttempt = 0
+                    cancelRecover()
                     decoder?.release()
                     decoder = null
                 },
@@ -328,8 +351,7 @@ class MainActivity : ComponentActivity() {
         }
         decoder?.release()
         decoder = null
-        mainHandler.removeCallbacks(recoverRunnable)
-        recoverAttempt = 0
+        cancelRecover()
     }
 
     /** Rotation: keep the session alive, just tell the Mac about the new panel — see `ReceiverSession.updatePanel`. */
@@ -350,7 +372,9 @@ class MainActivity : ComponentActivity() {
             forcedReconnectsWindow = 0
         }
         if (forcedReconnectsWindow >= 2) return false
-        if (now - lastForcedReconnectAtMs < 3_000) return false
+        // Chromebook: give VDA time to finish release/allocate between redials.
+        val minGapMs = if (isChromebook) 8_000L else 3_000L
+        if (now - lastForcedReconnectAtMs < minGapMs) return false
         forcedReconnectsWindow++
         lastForcedReconnectAtMs = now
         return true
@@ -412,8 +436,7 @@ class MainActivity : ComponentActivity() {
                 connected = false
                 cursorController.hide()
                 pendingSyncFrame = null
-                mainHandler.removeCallbacks(recoverRunnable)
-                recoverAttempt = 0
+                cancelRecover()
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 // Mac parks the session after hostSleeping — keep the Chromebook
                 // backlight dimmed until reconnect or the user taps the blank panel.
@@ -435,6 +458,11 @@ class MainActivity : ComponentActivity() {
             }
             // Non-blocking: decode runs on VideoDecoder's thread (iOS-style).
             d.feedAnnexB(data)
+            // Mid-session VDA death clears hasRendered — re-arm recover so we
+            // don't stay black until the user manually reconnects.
+            if (!d.hasRendered && session?.isConnected == true) {
+                scheduleRecover(recoverIntervalMs)
+            }
             if (d.consumeNeedsKeyframe()) {
                 val now = System.currentTimeMillis()
                 if (now - lastDecoderKfAtMs >= 2000) {

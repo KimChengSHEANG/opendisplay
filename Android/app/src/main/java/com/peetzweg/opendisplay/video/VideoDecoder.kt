@@ -93,6 +93,10 @@ class VideoDecoder(
     @Volatile
     private var awaitingSync: Boolean = true
 
+    /** Back off after a failed VDA allocate so we don't spam create/configure. */
+    @Volatile
+    private var nextStartCodecAtMs: Long = 0L
+
     fun consumeNeedsKeyframe(): Boolean {
         if (!keyframeRequested) return false
         keyframeRequested = false
@@ -131,16 +135,24 @@ class VideoDecoder(
     fun release() {
         if (released.getAndSet(true)) return
         queue.clear()
-        decodeExecutor.execute {
-            synchronized(this@VideoDecoder) {
-                releaseCodec()
-                sps = null
-                pps = null
-                hasRendered = false
-                awaitingSync = true
-                keyframeRequested = false
+        // Release on the decode thread. [codecLifecycleLock] serializes stop/release
+        // with the next instance's configure — overlapping ARC VDA allocate after
+        // screen-wake reconnect is what wedges the panel black permanently.
+        try {
+            decodeExecutor.execute {
+                synchronized(this@VideoDecoder) {
+                    releaseCodec()
+                    sps = null
+                    pps = null
+                    hasRendered = false
+                    awaitingSync = true
+                    keyframeRequested = false
+                    nextStartCodecAtMs = 0L
+                }
+                callbackThread.quitSafely()
             }
-            callbackThread.quitSafely()
+        } catch (_: RejectedExecutionException) {
+            synchronized(this) { releaseCodec() }
         }
         decodeExecutor.shutdown()
     }
@@ -171,19 +183,35 @@ class VideoDecoder(
     private fun decodeOne(frame: ByteArray) {
         val parametersChanged = scanForParameterSets(frame)
         if (codec != null && parametersChanged) releaseCodec()
+        val isSync = containsIdr(frame)
         if (codec == null) {
             val s = sps
             val p = pps
-            if (s != null && p != null) startCodec(s, p) else return
+            if (s == null || p == null) return
+            // Don't burn a VDA allocate on a P-frame — ARC often finishes
+            // configure just in time to miss the IDR, then stays black until
+            // the next (rare) keyframe.
+            if (!isSync) {
+                keyframeRequested = true
+                return
+            }
+            if (System.currentTimeMillis() < nextStartCodecAtMs) {
+                keyframeRequested = true
+                return
+            }
+            startCodec(s, p)
         }
-        val isSync = containsIdr(frame)
         if (awaitingSync && !isSync) {
             // Fresh codec / post-rebuild — wait for IDR; P-frames green VDA.
             keyframeRequested = true
             return
         }
         val accessUnit = annexBWithoutParameterSets(frame) ?: return
-        val c = codec ?: return
+        val c = codec ?: run {
+            // startCodec failed or still backing off — ask for another IDR.
+            keyframeRequested = true
+            return
+        }
         try {
             drainOutput(c)
             // Wait briefly for an input slot (iOS never skips mid-GOP).
@@ -231,13 +259,15 @@ class VideoDecoder(
         hasRendered = false
         awaitingSync = true
         if (c == null) return
-        try {
-            c.stop()
-        } catch (_: IllegalStateException) {
-        }
-        try {
-            c.release()
-        } catch (_: IllegalStateException) {
+        synchronized(codecLifecycleLock) {
+            try {
+                c.stop()
+            } catch (_: IllegalStateException) {
+            }
+            try {
+                c.release()
+            } catch (_: IllegalStateException) {
+            }
         }
     }
 
@@ -288,6 +318,7 @@ class VideoDecoder(
     }
 
     private fun startCodec(sps: ByteArray, pps: ByteArray) {
+        val now = System.currentTimeMillis()
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, DEFAULT_WIDTH, DEFAULT_HEIGHT)
         format.setByteBuffer("csd-0", ByteBuffer.wrap(START_CODE + sps))
         format.setByteBuffer("csd-1", ByteBuffer.wrap(START_CODE + pps))
@@ -306,22 +337,31 @@ class VideoDecoder(
             format.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
         }
         try {
-            val c = createCodec()
-            Log.i(TAG, "configure ${c.name} software=$preferSoftware")
-            c.configure(format, surface, null, 0)
-            c.start()
-            // Reset on the NEW codec, not on teardown: a mid-session rebuild
-            // (VDA after a surface abandon, a parameter-set change) must not
-            // blank the metric we are judging this work by, and any samples
-            // still pending belong to the codec that just went away.
-            timings.clear()
-            c.setOnFrameRenderedListener({ _, presentationTimeUs, nanoTime ->
-                timings.noteRendered(presentationTimeUs, nanoTime)
-            }, callbackHandler)
-            codec = c
+            // Hold the process-wide lock across create→configure→start so a
+            // prior instance's release finishes first (post-sleep thrash).
+            synchronized(codecLifecycleLock) {
+                val c = createCodec()
+                Log.i(TAG, "configure ${c.name} software=$preferSoftware")
+                c.configure(format, surface, null, 0)
+                c.start()
+                // Reset on the NEW codec, not on teardown: a mid-session rebuild
+                // (VDA after a surface abandon, a parameter-set change) must not
+                // blank the metric we are judging this work by, and any samples
+                // still pending belong to the codec that just went away.
+                timings.clear()
+                c.setOnFrameRenderedListener({ _, presentationTimeUs, nanoTime ->
+                    timings.noteRendered(presentationTimeUs, nanoTime)
+                }, callbackHandler)
+                codec = c
+            }
+            nextStartCodecAtMs = 0L
         } catch (e: Exception) {
             Log.e(TAG, "startCodec failed", e)
             codec = null
+            // ARC VDA allocate often needs several seconds after sleep; hammering
+            // create/configure while the previous attempt is dying wedges it.
+            nextStartCodecAtMs = now + START_CODEC_BACKOFF_MS
+            keyframeRequested = true
         }
     }
 
@@ -357,6 +397,11 @@ class VideoDecoder(
 
     companion object {
         private const val TAG = "VideoDecoder"
+        /**
+         * Serializes ARC VDA create/configure/release across decoder instances.
+         * Overlapping allocate after screen-wake reconnect wedges the panel black.
+         */
+        private val codecLifecycleLock = Any()
         /** Keep enough AUs for VDA warmup; shallow (2) blacks Chromebook on connect. */
         private const val QUEUE_CAP = 8
         private const val DROP_KF_THRESHOLD = 6
@@ -365,6 +410,8 @@ class VideoDecoder(
         /** Half a 60fps frame — long enough for the tail frame, short enough
          *  that a stalled decoder does not hold the decode thread. */
         private const val TAIL_TIMEOUT_US = 8_000L
+        /** After a failed configure/allocate, wait before retrying (Chromebook VDA). */
+        private const val START_CODEC_BACKOFF_MS = 2_000L
         private const val NAL_SPS = 7
         private const val NAL_PPS = 8
         private const val NAL_IDR = 5
