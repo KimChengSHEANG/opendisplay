@@ -52,7 +52,7 @@ android:
 
 # Kill any live instance so we don't reuse a stale process, pause briefly so
 # WindowServer can release the previous virtual-display serial, then open.
-mac-run: mac
+run-mac: mac
 	@test -d "$(APP)" || (echo "Mac app missing at $(APP)"; exit 1)
 	-killall OpenDisplay 2>/dev/null
 	@sleep 0.3
@@ -60,7 +60,7 @@ mac-run: mac
 	@echo "OpenDisplay running — logs at /tmp/opensidecar-mac.log."
 
 # Build APK → pick adb device → install → launch.
-android-run: android
+run-android: android
 	@test -f "$(ANDROID_APK)" || (echo "APK missing at $(ANDROID_APK)"; exit 1)
 	@serial=$$(./scripts/pick-adb-device.sh); \
 	echo "Installing on $$serial..."; \
@@ -70,7 +70,7 @@ android-run: android
 	echo "OpenDisplay Android running on $$serial."
 
 # Build for device → pick iPhone/iPad → install → launch.
-ios-run: ios-device
+run-ios: ios-device
 	@test -d "$(IOS_APP)" || (echo "iOS app missing at $(IOS_APP)"; exit 1)
 	@device=$$(./scripts/pick-ios-device.sh); \
 	./scripts/ios-install-run.sh "$$device" "$(IOS_APP)" "$(IOS_BUNDLE)"; \
