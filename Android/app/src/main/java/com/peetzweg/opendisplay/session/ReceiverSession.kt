@@ -539,6 +539,9 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         if (udpVideoEnabled && !preferTcpVideo && "udp" in video && port != null && streamId != null) {
             try {
                 startUdpVideo(port, streamId)
+                // Decoder starts awaitingSync; ask for IDR with the select so
+                // the first UDP AU is usable even if Mac mid-GOP.
+                sendControl(mapOf("type" to "kf"))
                 sendControl(
                     mapOf(
                         "type" to WireMessage.transportSelected,

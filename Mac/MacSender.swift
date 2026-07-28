@@ -1339,7 +1339,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 videoRateController = VideoRateController(initialBitrate: encodeBitrate)
                 applyKeyframeInterval(forUdp: true)
                 udpVideoSender?.updateBitrate(encodeBitrate)
-                Log.info("UDP video selected (stream \(selectedStreamId ?? 0)); TCP remains control")
+                // Fresh UDP path — decoder is awaitingSync; force IDR now so
+                // Chromebook VDA is not stuck black waiting for a periodic GOP.
+                needsKeyframe = true
+                if let pixelBuffer = lastPixelBuffer {
+                    Log.info("UDP video selected (stream \(selectedStreamId ?? 0)) — forcing keyframe")
+                    encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
+                } else {
+                    Log.info("UDP video selected (stream \(selectedStreamId ?? 0)); TCP remains control")
+                }
             } else {
                 videoViaUdp = false
                 videoRateController = nil

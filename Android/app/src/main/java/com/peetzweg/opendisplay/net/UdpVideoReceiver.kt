@@ -3,6 +3,7 @@ package com.peetzweg.opendisplay.net
 import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
@@ -79,7 +80,23 @@ class UdpVideoReceiver(port: Int) {
 
     private val socket = DatagramSocket(null).apply {
         reuseAddress = true
-        bind(InetSocketAddress("0.0.0.0", port))
+        // Prefer :: so IPv6 peers (Chromebook ARC WiFi) deliver datagrams.
+        // 0.0.0.0 is IPv4-only — Mac sending to the TCP remote IPv6 address
+        // never reaches that bind, which blacks the panel until reconnect.
+        var bound = false
+        var lastError: IOException? = null
+        for (host in UdpBindAddress.bindHostCandidates()) {
+            try {
+                bind(InetSocketAddress(InetAddress.getByName(host), port))
+                bound = true
+                break
+            } catch (error: IOException) {
+                lastError = error
+            }
+        }
+        if (!bound) {
+            throw lastError ?: IOException("UDP bind failed for port $port")
+        }
     }
     @Volatile private var running = false
     private var receiveThread: Thread? = null

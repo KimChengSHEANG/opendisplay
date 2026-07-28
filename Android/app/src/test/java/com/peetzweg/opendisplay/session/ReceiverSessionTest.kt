@@ -133,9 +133,11 @@ class ReceiverSessionTest {
             ),
         )
 
-        val selected = sent.single {
-            it["type"] == com.peetzweg.opendisplay.wire.WireMessage.transportSelected
-        }
+        assertEquals(
+            listOf("kf", com.peetzweg.opendisplay.wire.WireMessage.transportSelected),
+            sent.map { it["type"] },
+        )
+        val selected = sent.last()
         assertEquals("udp", selected["video"])
         assertEquals(7, selected["streamId"])
         assertEquals(7, session.udpVideoStreamId)
