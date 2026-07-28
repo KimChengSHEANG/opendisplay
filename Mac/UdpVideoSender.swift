@@ -18,7 +18,9 @@ final class UdpVideoSender {
     /// Enough for one full RS block (255) plus paced headroom. A hard 64
     /// rejected typical 1080p IDRs even on an empty queue → Chromebook black.
     private let maxPendingDatagrams = 256
-    private let maxFrameDatagrams = 255
+    /// Wire cap (≈4 MiB / max payload). RS FEC only when data+parity ≤ 255;
+    /// larger IDRs packetize data-only — must not trap or hard-reject at 255.
+    private let maxFrameDatagrams = 4096
     private let batchSize = 12
     private let minPaceDelayMs = 0.05
     /// Tighter than 8ms — large frames leave the wire sooner (still paced).

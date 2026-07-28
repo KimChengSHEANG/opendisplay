@@ -47,5 +47,6 @@ class UdpVideoProtocolTest {
     fun parityShardCount_twentyPercent() {
         assertEquals(2, UdpVideoProtocol.parityShardCount(dataShardCount = 10, fecPct = 20))
         assertEquals(0, UdpVideoProtocol.parityShardCount(dataShardCount = 10, fecPct = 0))
+        assertEquals(0, UdpVideoProtocol.parityShardCount(dataShardCount = 256, fecPct = 20))
     }
 }

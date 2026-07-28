@@ -76,8 +76,11 @@ enum ReedSolomonFEC {
     }()
 
     static func encode(dataShards: [Data], parityCount: Int) -> [Data] {
-        precondition(!dataShards.isEmpty)
         precondition(parityCount >= 0)
+        // Oversized IDRs disable FEC (parityCount == 0) and still packetize
+        // above maxRsShards — do not trap on the RS block limit then.
+        if parityCount == 0 { return [] }
+        precondition(!dataShards.isEmpty)
         precondition(dataShards.count + parityCount <= UdpVideoProtocol.maxRsShards)
         let shardSize = dataShards[0].count
         precondition(dataShards.allSatisfy { $0.count == shardSize })

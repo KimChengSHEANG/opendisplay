@@ -66,11 +66,24 @@ class UdpSendBudgetTest {
     }
 
     @Test
-    fun rejects_oversized_frame_beyond_rs_cap() {
+    fun admits_oversized_no_fec_idr_within_wire_cap() {
+        // RS FEC stops at 255, but data-only IDRs may be larger.
+        assertTrue(
+            UdpSendBudget.shouldAdmitFrame(
+                pendingDatagrams = 0,
+                frameDatagrams = 300,
+                maxPending = 256,
+                keyframe = true,
+            ),
+        )
+    }
+
+    @Test
+    fun rejects_frame_beyond_wire_datagram_cap() {
         assertFalse(
             UdpSendBudget.shouldAdmitFrame(
                 pendingDatagrams = 0,
-                frameDatagrams = 256,
+                frameDatagrams = UdpSendBudget.MAX_FRAME_DATAGRAMS + 1,
                 maxPending = 256,
                 keyframe = true,
             ),

@@ -17,8 +17,11 @@ object ReedSolomon {
     }
 
     fun encode(dataShards: Array<ByteArray>, parityCount: Int): Array<ByteArray> {
-        require(dataShards.isNotEmpty())
         require(parityCount >= 0)
+        // Oversized IDRs disable FEC (parityCount == 0) and still packetize
+        // above MAX_RS_SHARDS — do not require the RS block limit then.
+        if (parityCount == 0) return emptyArray()
+        require(dataShards.isNotEmpty())
         require(dataShards.size + parityCount <= UdpVideoProtocol.MAX_RS_SHARDS)
         val shardSize = dataShards.first().size
         require(dataShards.all { it.size == shardSize })

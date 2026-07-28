@@ -185,4 +185,33 @@ class UdpVideoFecTest {
         // Offer only the first data shard — far below recoverability.
         assertNull(assembler.offer(packaged.packets.first().datagram))
     }
+
+    @Test
+    fun packageFrame_oversizedIdrSkipsFecWithoutThrowing() {
+        // >255 data shards: RS block cannot include FEC. Must still packetize
+        // (Mac used to trap in ReedSolomon.encode on the first UDP IDR).
+        val au = ByteArray(UdpVideoProtocol.MAX_PAYLOAD * 260)
+        val packaged = UdpVideoPackager.packageFrame(
+            au = au,
+            frameId = 1L,
+            startSeq = 0,
+            keyframe = true,
+            fecPct = 20,
+            captureMs = 1L,
+            sendMs = 2L,
+        )
+        assertTrue(packaged.packets.size > UdpVideoProtocol.MAX_RS_SHARDS)
+        assertEquals(0, packaged.packets.count { it.isParity })
+        val header = UdpVideoProtocol.decodeHeader(packaged.packets.first().datagram)!!
+        assertEquals(0, header.fecPct)
+        assertTrue(header.dataShardCount > UdpVideoProtocol.MAX_RS_SHARDS)
+
+        val assembler = UdpFrameAssembler()
+        var out: UdpFrameAssembler.AssembledFrame? = null
+        for (packet in packaged.packets) {
+            assembler.offer(packet.datagram)?.let { out = it }
+        }
+        assertNotNull(out)
+        assertArrayEquals(au, out!!.annexB)
+    }
 }
