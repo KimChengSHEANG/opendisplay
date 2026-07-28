@@ -159,7 +159,8 @@ class MainActivity : ComponentActivity() {
     private val hostSleep = HostSleepController(
         // Sync flush so `sleeping`/`closing` reach the Mac before stop() tears
         // the socket — otherwise wake-reconnect never arms.
-        sendControl = { session?.sendControlSync(it) },
+        // sendControl = { session?.sendControlSync(it) },
+        sendControl = { session?.sendControl(it) },
         setBrightness = { value -> panelBacklight.set(value) },
         setKeepScreenOn = { keep ->
             if (keep) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -183,15 +184,9 @@ class MainActivity : ComponentActivity() {
     private val lockReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
-                // Always disconnect on screen-off — Chromebooks often have no
-                // Android keyguard (`isDeviceSecure == false`), so gating on
-                // lock previously left the Mac streaming into a dark panel.
-                Intent.ACTION_SCREEN_OFF -> hostSleep.onDeviceWillLock()
-                Intent.ACTION_SCREEN_ON -> {
+                Intent.ACTION_SCREEN_OFF -> {
                     val km = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-                    // Secure phones: wait for USER_PRESENT (unlock). Chromebook /
-                    // no lock: screen-on is enough to resume listening.
-                    if (km?.isDeviceSecure != true) hostSleep.onDeviceUnlocked()
+                    if (km?.isDeviceSecure == true) hostSleep.onDeviceWillLock()
                 }
                 Intent.ACTION_USER_PRESENT -> hostSleep.onDeviceUnlocked()
             }
@@ -210,10 +205,7 @@ class MainActivity : ComponentActivity() {
         showAnalytics = AppSettings.showAnalytics(this)
         connectionMode = AppSettings.connectionMode(this)
         if (!lockReceiverRegistered) {
-            val filter = IntentFilter(Intent.ACTION_SCREEN_OFF).apply {
-                addAction(Intent.ACTION_SCREEN_ON)
-                addAction(Intent.ACTION_USER_PRESENT)
-            }
+            val filter = IntentFilter(Intent.ACTION_SCREEN_OFF).apply { addAction(Intent.ACTION_USER_PRESENT) }
             ContextCompat.registerReceiver(this, lockReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
             lockReceiverRegistered = true
         }
