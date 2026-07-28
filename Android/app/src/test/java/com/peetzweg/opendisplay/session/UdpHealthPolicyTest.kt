@@ -20,6 +20,13 @@ class UdpHealthPolicyTest {
     }
 
     @Test
+    fun falls_back_after_three_bad_qos_windows() {
+        val policy = UdpHealthPolicy.FallbackTracker()
+        repeat(3) { policy.noteWindow(lossPct = 30.0) }
+        assertEquals("tcp", policy.preferredVideoTransport())
+    }
+
+    @Test
     fun qos_map_contains_required_keys() {
         val map = UdpHealthPolicy.qosMap(
             lossPct = 4.0,

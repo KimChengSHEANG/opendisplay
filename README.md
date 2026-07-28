@@ -185,6 +185,13 @@ has no cable.
 - **Android phone / tablet:** USB (with `adb forward`) or WiFi.
 - **Chromebook:** WiFi or Ethernet only — no USB path.
 
+**Android/Chromebook WiFi UDP video (protocol 3):** optional UDP transport with
+FEC, NACK, pacing, and qos-driven fallback to TCP on sustained loss. Default
+`videoTransport` is **auto → TCP** until the keep-UDP gate in
+`superpowers/plans/2026-07-26-android-udp-latency-baseline.md` passes; opt in
+with `defaults write com.peetzweg.opensidecar.mac videoTransport udp` or the Mac
+app Settings → **WiFi video (Android)** picker.
+
 Both sides need **Local Network** permission on the Mac (and on iOS for WiFi).
 Android WiFi discovery uses the same Bonjour service as iOS.
 

@@ -81,7 +81,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     private var qosDecodeErrorsWindow = 0
     private var qosNacksWindow = 0
     private var qosFramesWindow = 0
-    private var consecutiveBadQosWindows = 0
+    private val fallbackTracker = UdpHealthPolicy.FallbackTracker()
 
     // --- Liveness / clock sync (iOS PhoneReceiver) ---
     private val lastDataReceivedMs = AtomicLong(0L)
@@ -191,7 +191,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
             qosDecodeErrorsWindow = 0
             qosNacksWindow = 0
             qosFramesWindow = 0
-            consecutiveBadQosWindows = 0
+            fallbackTracker.reset()
         }
         udpVideoReceiver = UdpVideoReceiver(port).also { receiver ->
             receiver.start(
@@ -286,7 +286,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
             qosDecodeErrorsWindow = 0
             qosNacksWindow = 0
             qosFramesWindow = 0
-            consecutiveBadQosWindows = 0
+            fallbackTracker.reset()
         }
     }
 
@@ -342,14 +342,10 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
             sendControl(mapOf("type" to "kf"))
         }
         synchronized(udpStateLock) {
-            if (snapshot.lossPct >= 20.0) {
-                consecutiveBadQosWindows++
-            } else if (snapshot.lossPct < 5.0) {
-                consecutiveBadQosWindows = 0
-            }
-            if (UdpHealthPolicy.shouldFallbackToTcp(snapshot.lossPct, consecutiveBadQosWindows)) {
+            fallbackTracker.noteWindow(snapshot.lossPct)
+            if (fallbackTracker.preferredVideoTransport() == "tcp") {
                 preferTcpVideo = true
-                consecutiveBadQosWindows = 0
+                fallbackTracker.reset()
                 val streamId = udpVideoStreamId ?: 0
                 stopUdpVideo()
                 sendControl(

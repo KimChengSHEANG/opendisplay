@@ -131,6 +131,28 @@ Streaming still uses **WiFi/Ethernet Bonjour**, not the ADB tunnel.
   on the Mac if the app shows a missing-`adb` banner
   (`brew install --cask android-platform-tools`).
 
+## WiFi UDP video (Android / Chromebook)
+
+On WiFi, the Mac and receiver may negotiate **UDP video** (protocol 3) with
+~20% Reed–Solomon FEC, NACK retransmit, paced sends, a small jitter buffer,
+and qos-driven bitrate. Control JSON always stays on the TCP control socket.
+
+| Mac `videoTransport` | Behavior |
+|---|---|
+| `auto` (default) | TCP video until the keep-UDP gate passes on Chromebook WiFi |
+| `tcp` | Always framed TCP video |
+| `udp` | Opt in to UDP; receiver falls back to TCP after sustained high loss |
+
+Set on the Mac via **Settings → WiFi video (Android)** or:
+
+```sh
+defaults write com.peetzweg.opensidecar.mac videoTransport tcp   # or udp | auto
+```
+
+USB paths and iOS receivers remain TCP video only. See
+[COMPATIBILITY.md](../COMPATIBILITY.md) and the baseline checklist at
+`superpowers/plans/2026-07-26-android-udp-latency-baseline.md`.
+
 ## Staying awake while streaming
 
 v1 keeps the display alive with an **Activity-scoped `FLAG_KEEP_SCREEN_ON`**

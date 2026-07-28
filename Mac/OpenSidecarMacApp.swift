@@ -47,6 +47,32 @@ enum AppPresentation: String, CaseIterable {
     }
 }
 
+/// WiFi video transport for Android/Chromebook peers (Mac sender preference).
+enum VideoTransportPreference: String, CaseIterable, Identifiable {
+    case auto, tcp, udp
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .auto: return "Auto (TCP until gate)"
+        case .tcp: return "TCP only"
+        case .udp: return "UDP (opt-in)"
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .auto:
+            return "Uses TCP video on WiFi until the Chromebook keep-UDP gate passes; then UDP when enabled."
+        case .tcp:
+            return "Always framed TCP video — safest default for USB and mixed peers."
+        case .udp:
+            return "Negotiate UDP video with FEC/NACK on Android/Chromebook WiFi; falls back to TCP on sustained loss."
+        }
+    }
+}
+
 @main
 struct OpenSidecarMacApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -241,6 +267,10 @@ final class SenderController: ObservableObject {
     @Published var mode = CaptureMode(rawValue: UserDefaults.standard.string(forKey: "mode") ?? "") ?? .extend
     @Published var quality = StreamQuality.parse(UserDefaults.standard.string(forKey: "quality") ?? "") ?? .best {
         didSet { UserDefaults.standard.set(quality.rawValue, forKey: "quality") }
+    }
+    @Published var videoTransport = VideoTransportPreference(
+        rawValue: UserDefaults.standard.string(forKey: "videoTransport") ?? "") ?? .auto {
+        didSet { UserDefaults.standard.set(videoTransport.rawValue, forKey: "videoTransport") }
     }
     /// USB & WiFi / USB only / WiFi only — default for devices without an override.
     @Published var connectionMode =
@@ -1896,6 +1926,17 @@ struct ContentView: View {
                     }
                     .onChange(of: controller.quality) { controller.restartAll() }
                     Text("Used when a device has no Sharpness override. \(controller.quality.explanation)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Picker("WiFi video (Android)", selection: $controller.videoTransport) {
+                        ForEach(VideoTransportPreference.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    Text("Control JSON stays on TCP. \(controller.videoTransport.explanation)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

@@ -24,4 +24,27 @@ object UdpHealthPolicy {
         "lateFrames" to lateFrames,
         "fecRecoveries" to fecRecoveries,
     )
+
+    class FallbackTracker {
+        private var bad = 0
+        private var preferred = "udp"
+
+        fun noteWindow(lossPct: Double) {
+            if (shouldFallbackToTcp(lossPct, bad + 1)) {
+                bad += 1
+                if (bad >= BAD_WINDOWS_FOR_FALLBACK) preferred = "tcp"
+            } else if (lossPct < 5.0) {
+                bad = 0
+            } else {
+                bad += 1
+            }
+        }
+
+        fun preferredVideoTransport(): String = preferred
+
+        fun reset() {
+            bad = 0
+            preferred = "udp"
+        }
+    }
 }
