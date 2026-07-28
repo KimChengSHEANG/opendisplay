@@ -328,12 +328,12 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
                 qosFramesWindow = 0
             }
         }
-        val nackRate = if (window.frames > 0) window.nacks.toDouble() / window.frames else 0.0
+        val incompleteRate = UdpHealthPolicy.incompleteRate(window.incompleteFrames, window.frames)
         sendControl(
             UdpHealthPolicy.qosMap(
                 lossPct = snapshot.lossPct,
                 jitterMs = snapshot.jitterMs,
-                nackRate = nackRate,
+                incompleteRate = incompleteRate,
                 lateFrames = window.lateFrames,
                 fecRecoveries = snapshot.fecRecoveries,
             ),

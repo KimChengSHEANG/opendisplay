@@ -27,16 +27,26 @@ class UdpHealthPolicyTest {
     }
 
     @Test
-    fun qos_map_contains_required_keys() {
+    fun incomplete_rate_is_incomplete_over_frames() {
+        assertEquals(0.0, UdpHealthPolicy.incompleteRate(incompleteFrames = 3, frames = 0), 0.0)
+        assertEquals(0.25, UdpHealthPolicy.incompleteRate(incompleteFrames = 1, frames = 4), 0.0)
+    }
+
+    @Test
+    fun qos_map_uses_incomplete_rate_not_nack_rate() {
         val map = UdpHealthPolicy.qosMap(
             lossPct = 4.0,
             jitterMs = 12.0,
-            nackRate = 0.05,
+            incompleteRate = 0.05,
             lateFrames = 1,
             fecRecoveries = 3,
         )
         assertEquals("qos", map["type"])
         assertEquals(4.0, map["lossPct"])
         assertEquals(12.0, map["jitterMs"])
+        assertEquals(0.05, map["incompleteRate"])
+        assertEquals(1, map["lateFrames"])
+        assertEquals(3, map["fecRecoveries"])
+        assertFalse(map.containsKey("nackRate"))
     }
 }

@@ -10,17 +10,20 @@ object UdpHealthPolicy {
     fun shouldFallbackToTcp(lossPct: Double, consecutiveBadWindows: Int): Boolean =
         lossPct >= LOSS_FALLBACK_PCT && consecutiveBadWindows >= BAD_WINDOWS_FOR_FALLBACK
 
+    fun incompleteRate(incompleteFrames: Int, frames: Int): Double =
+        if (frames > 0) incompleteFrames.toDouble() / frames.toDouble() else 0.0
+
     fun qosMap(
         lossPct: Double,
         jitterMs: Double,
-        nackRate: Double,
+        incompleteRate: Double,
         lateFrames: Int,
         fecRecoveries: Int,
     ): Map<String, Any> = mapOf(
         "type" to "qos",
         "lossPct" to lossPct,
         "jitterMs" to jitterMs,
-        "nackRate" to nackRate,
+        "incompleteRate" to incompleteRate,
         "lateFrames" to lateFrames,
         "fecRecoveries" to fecRecoveries,
     )
