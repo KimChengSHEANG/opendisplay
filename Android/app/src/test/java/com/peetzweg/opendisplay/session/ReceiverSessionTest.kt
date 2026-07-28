@@ -157,6 +157,21 @@ class ReceiverSessionTest {
     }
 
     @Test
+    fun resetStreamState_clearsPreferTcpVideoAfterFallback() {
+        val session = ReceiverSession(listener = noopListener)
+        session.preferTcpVideoForTest = true
+        session.resetStreamStateForTest()
+        assertFalse(session.preferTcpVideoForTest)
+        assertTrue(
+            ReceiverSession.shouldOfferUdpVideo(
+                isLoopback = false,
+                udpVideoEnabled = true,
+                preferTcpVideo = session.preferTcpVideoForTest,
+            ),
+        )
+    }
+
+    @Test
     fun updatePanel_sameMetricsIsNoOp() {
         val session = ReceiverSession(listener = noopListener)
         session.pixelsWide = 1080

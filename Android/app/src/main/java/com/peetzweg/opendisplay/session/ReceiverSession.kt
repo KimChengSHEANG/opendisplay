@@ -514,6 +514,14 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
 
     internal fun handleControlForTest(map: Map<String, Any>) = dispatchControl(map)
 
+    internal fun resetStreamStateForTest() = resetStreamState()
+
+    internal var preferTcpVideoForTest: Boolean
+        get() = preferTcpVideo
+        set(value) {
+            preferTcpVideo = value
+        }
+
     private fun onTransportOffer(map: Map<String, Any>) {
         val video = when (val value = map["video"]) {
             is Iterable<*> -> value.mapNotNull { it as? String }
@@ -704,6 +712,10 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     }
 
     private fun resetStreamState() {
+        preferTcpVideo = false
+        synchronized(udpStateLock) {
+            fallbackTracker.reset()
+        }
         synchronized(offsetLock) {
             offsetSamples.clear()
             clockOffsetMs = null
@@ -796,6 +808,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     private fun closeClient(reason: String, notify: Boolean, announceBye: Boolean) {
         stopLivenessTimers()
         stopUdpVideo()
+        preferTcpVideo = false
         val had = clientSocket != null
         if (had) {
             logW("closeClient reason=$reason notify=$notify announceBye=$announceBye")
