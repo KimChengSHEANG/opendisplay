@@ -23,7 +23,7 @@ ANDROID_DIR = Android
 ANDROID_APK = $(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk
 ANDROID_PKG = com.peetzweg.opendisplay
 
-.PHONY: all mac ios ios-device ios-run android android-run mac-run clean generate
+.PHONY: all mac ios ios-device ios-run android android-run mac-run mac-log clean generate
 
 all: mac ios android
 
@@ -58,6 +58,9 @@ run-mac: mac
 	@sleep 0.3
 	open "$(APP)"
 	@echo "OpenDisplay running — logs at /tmp/opensidecar-mac.log."
+
+mac-log:
+	python3 tools/parse_mac_log.py
 
 # Build APK → pick adb device → install → launch.
 run-android: android
