@@ -216,6 +216,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var connection: NWConnection?
     private var udpVideoSender: UdpVideoSender?
     private var udpStreamId: UInt32?
+    private var videoViaUdp = false
+    private let maxPendingUdpDatagrams = 64
     private var virtualDisplay: VirtualDisplay?
     private let queue = DispatchQueue(label: "sender.video")
     private let startCode: [UInt8] = [0, 0, 0, 1]
@@ -698,6 +700,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         udpVideoSender?.stop()
         udpVideoSender = nil
         udpStreamId = nil
+        videoViaUdp = false
 
         queue.async { [weak self] in
             guard let self else { return }
@@ -748,6 +751,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.udpVideoSender?.stop()
             self.udpVideoSender = nil
             self.udpStreamId = nil
+            self.videoViaUdp = false
             self.pendingSends = 0
             self.pipelineLock.lock()
             self.pendingEncodes = 0
@@ -1039,6 +1043,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         udpVideoSender?.stop()
         udpVideoSender = nil
         udpStreamId = nil
+        videoViaUdp = false
         pendingSends = 0
         pipelineLock.lock()
         pendingEncodes = 0
@@ -1329,8 +1334,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let selected = obj["video"] as? String
             let selectedStreamId = (obj["streamId"] as? NSNumber)?.uint32Value
             if selected == "udp", selectedStreamId == udpStreamId {
+                videoViaUdp = true
+                udpVideoSender?.updateBitrate(encodeBitrate)
                 Log.info("UDP video selected (stream \(selectedStreamId ?? 0)); TCP remains control")
             } else {
+                videoViaUdp = false
                 udpVideoSender?.stop()
                 udpVideoSender = nil
                 udpStreamId = nil
@@ -1503,7 +1511,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         case "pending_encode":
             drop = pendingEncodes >= maxPendingEncodes
         case "pending_sends":
-            drop = pendingSends >= maxPendingSends
+            if videoViaUdp {
+                drop = (udpVideoSender?.pendingCount ?? 0) >= maxPendingUdpDatagrams
+            } else {
+                drop = pendingSends >= maxPendingSends
+            }
         default:
             drop = false
         }
@@ -1532,7 +1544,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// If a newer capture was held while encode/send was busy, submit it now.
     private func encodeHeldIfReady() {
         pipelineLock.lock()
-        let busy = pendingEncodes >= maxPendingEncodes || pendingSends >= maxPendingSends
+        let sendBusy = videoViaUdp
+            ? (udpVideoSender?.pendingCount ?? 0) >= maxPendingUdpDatagrams
+            : pendingSends >= maxPendingSends
+        let busy = pendingEncodes >= maxPendingEncodes || sendBusy
         guard !busy, let buffer = heldLatestBuffer else {
             pipelineLock.unlock()
             return
@@ -1572,7 +1587,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             encodeHeldIfReady()
             return
         }
-        let busy = pendingEncodes >= maxPendingEncodes || pendingSends >= maxPendingSends
+        let sendBusy = videoViaUdp
+            ? (udpVideoSender?.pendingCount ?? 0) >= maxPendingUdpDatagrams
+            : pendingSends >= maxPendingSends
+        let busy = pendingEncodes >= maxPendingEncodes || sendBusy
         pipelineLock.unlock()
         guard !busy else { return }
         let quiet = Date().timeIntervalSince(lastCaptureAt) > 0.09
@@ -1613,7 +1631,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let sndMs = Int64(Date().timeIntervalSince1970 * 1000)
                 var framed = Data("{\"cap\":\(capturedAtMs),\"snd\":\(sndMs)}".utf8)
                 framed.append(data)
-                self.sendFramed(framed)
+                self.sendFramed(
+                    framed,
+                    keyframe: self.isKeyframe(buffer),
+                    captureMs: UInt64(capturedAtMs)
+                )
             }
             // Encode the newest held capture immediately — do not wait for SCK.
             self.queue.async { self.encodeHeldIfReady() }
@@ -1702,6 +1724,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         udpVideoSender?.stop()
         udpVideoSender = nil
         udpStreamId = nil
+        videoViaUdp = false
 
         guard info.kind == "Android" || info.kind == "Chromebook",
               info.video?.contains("udp") == true,
@@ -1715,7 +1738,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
         let streamId = UInt32.random(in: 1...UInt32.max)
         udpStreamId = streamId
-        udpVideoSender = UdpVideoSender(host: host, port: port, queue: queue)
+        let sender = UdpVideoSender(queue: queue)
+        sender.updateBitrate(encodeBitrate)
+        sender.onFailed = { [weak self] msg in
+            guard let self else { return }
+            Log.info("UDP video failed (\(msg)) — staying on TCP")
+            self.videoViaUdp = false
+            self.udpVideoSender?.stop()
+            self.udpVideoSender = nil
+            self.udpStreamId = nil
+        }
+        udpVideoSender = sender
+        sender.connect(host: host, port: port)
         sendJSONFrame([
             "type": WireMessage.transportOffer,
             "video": ["udp", "tcp"],
@@ -1779,8 +1813,32 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         sendJSONFrame(json)
     }
 
-    private func sendFramed(_ payload: Data) {
-        guard let connection, connectionReady else { return }
+    private func sendFramed(_ payload: Data, keyframe: Bool = false, captureMs: UInt64 = 0) {
+        guard connectionReady else { return }
+        if videoViaUdp, let udp = udpVideoSender, udp.isReady {
+            let ok = udp.sendFrame(au: payload, keyframe: keyframe, captureMs: captureMs)
+            if ok {
+                framesSent += 1
+                bytesSent += payload.count
+                queue.async { self.encodeHeldIfReady() }
+                let elapsed = Date().timeIntervalSince(statsWindowStart)
+                if elapsed >= 1.0 {
+                    let mbps = Double(bytesSent) * 8 / elapsed / 1_000_000
+                    let frames = framesSent
+                    bytesSent = 0
+                    framesSent = 0
+                    statsWindowStart = Date()
+                    Task { @MainActor in self.onStats?(frames, mbps) }
+                }
+            } else {
+                pipelineLock.lock()
+                dropsNetThisWindow += 1
+                dropsNetTotal += 1
+                pipelineLock.unlock()
+            }
+            return
+        }
+        guard let connection else { return }
         var header = UInt32(payload.count).bigEndian
         var frame = Data(bytes: &header, count: 4)
         frame.append(payload)

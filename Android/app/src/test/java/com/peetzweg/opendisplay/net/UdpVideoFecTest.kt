@@ -4,6 +4,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class UdpVideoFecTest {
@@ -25,6 +26,24 @@ class UdpVideoFecTest {
         val decoded = ReedSolomon.decode(received, dataCount = data.size)
         assertNotNull(decoded)
         for (index in data.indices) assertArrayEquals(data[index], decoded!![index])
+    }
+
+    @Test
+    fun packageFrame_emitsDataAndParityDatagrams() {
+        val au = ByteArray(2500) { i -> (i % 251).toByte() }
+        val packaged = UdpVideoPackager.packageFrame(
+            au = au,
+            frameId = 7L,
+            startSeq = 100,
+            keyframe = true,
+            fecPct = 20,
+            captureMs = 50L,
+            sendMs = 60L,
+        )
+        val dataPackets = packaged.packets.count { !it.isParity }
+        val parityPackets = packaged.packets.count { it.isParity }
+        assertTrue(parityPackets > 0)
+        assertEquals(dataPackets + parityPackets, packaged.packets.size)
     }
 
     @Test

@@ -127,6 +127,7 @@ enum UdpVideoPackager {
     struct Packet {
         let datagram: Data
         let isParity: Bool
+        let seq: UInt16
     }
 
     static func packageFrame(
@@ -176,7 +177,8 @@ enum UdpVideoPackager {
                     sendMs: sendMs,
                     payload: payloads[index]
                 ),
-                isParity: false
+                isParity: false,
+                seq: seq
             ))
             seq &+= 1
         }
@@ -198,7 +200,8 @@ enum UdpVideoPackager {
                     sendMs: sendMs,
                     payload: parityShards[index]
                 ),
-                isParity: true
+                isParity: true,
+                seq: seq
             ))
             seq &+= 1
         }
