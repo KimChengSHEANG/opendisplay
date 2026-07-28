@@ -25,6 +25,12 @@ data class PerfStats(
     val decodeP50: Double = 0.0,
     val decodeP95: Double = 0.0,
     val offsetKnown: Boolean = false,
+    /** Video delivery path: `tcp` or `udp`. */
+    val videoTransport: String = "tcp",
+    /** UDP seq-gap loss % (null when video is TCP-only). */
+    val lossPct: Double? = null,
+    /** FEC shards recovered in the last QoS window. */
+    val fecRecoveries: Int = 0,
 ) {
     /**
      * Capture→glass estimate for the overlay: wire e2e (cap→receive) plus

@@ -11,10 +11,31 @@ package com.peetzweg.opendisplay.session
  * keep the socket and recover in place (keyframes / codec rebuild).
  */
 object ChromebookRecoverPolicy {
+    enum class Action { RequestKeyframe, RebuildCodec, TearSession }
+
     /**
      * @param hasPaintedThisConnection true once the decoder has rendered at
      *   least one frame for this TCP session
      */
     fun allowForceReconnect(hasPaintedThisConnection: Boolean): Boolean =
         !hasPaintedThisConnection
+
+    /**
+     * Decode-error recovery — UDP never tears the control TCP socket.
+     * After several VDA failures, rebuild the codec in place; otherwise ask
+     * for an IDR.
+     */
+    fun onDecodeError(transport: String, consecutiveErrors: Int): Action {
+        if (transport == "udp") {
+            return if (consecutiveErrors >= 5) Action.RebuildCodec else Action.RequestKeyframe
+        }
+        return existingTcpBehavior(consecutiveErrors)
+    }
+
+    /** Phone / TCP video: escalate to session tear only after many failures. */
+    private fun existingTcpBehavior(consecutiveErrors: Int): Action = when {
+        consecutiveErrors >= 10 -> Action.TearSession
+        consecutiveErrors >= 5 -> Action.RebuildCodec
+        else -> Action.RequestKeyframe
+    }
 }

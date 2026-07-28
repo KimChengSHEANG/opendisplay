@@ -52,7 +52,11 @@ class VideoDecoder(
         }
     }
     /** Called when VDA throws during decode — feeds UDP QoS keyframe policy. */
-    var onDecodeError: (() -> Unit)? = null
+    var onDecodeError: ((consecutiveErrors: Int) -> Unit)? = null
+    /** Consecutive decode failures since last successful queue. */
+    @Volatile
+    var consecutiveDecodeErrors: Int = 0
+        private set
     /** Queued→rendered latency for the perf overlay (iOS `decodeP50`). */
     val timings = DecodeTimings()
 
@@ -238,6 +242,7 @@ class VideoDecoder(
             val ptsUs = System.nanoTime() / 1000
             c.queueInputBuffer(index, 0, accessUnit.size, ptsUs, flags)
             if (isSync) awaitingSync = false
+            consecutiveDecodeErrors = 0
             timings.noteQueued(ptsUs, System.nanoTime())
             // Nothing queued behind this frame: wait briefly so it reaches the
             // panel now rather than on the next frame off the network. Without
@@ -246,7 +251,8 @@ class VideoDecoder(
             drainOutput(c, if (queue.isEmpty()) TAIL_TIMEOUT_US else 0)
         } catch (e: IllegalStateException) {
             Log.w(TAG, "decodeOne: ${e.message}")
-            onDecodeError?.invoke()
+            consecutiveDecodeErrors++
+            onDecodeError?.invoke(consecutiveDecodeErrors)
             // VDA often dies after a SurfaceView abandon — rebuild on next IDR.
             releaseCodec()
             keyframeRequested = true

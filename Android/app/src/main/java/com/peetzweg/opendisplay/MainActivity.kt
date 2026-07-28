@@ -240,7 +240,9 @@ class MainActivity : ComponentActivity() {
                     // it, then ask for another keyframe in case the stash was
                     // only P-frames or the ARC decoder needed a second sync.
                     d.renderingPaused = false
-                    d.onDecodeError = { session?.noteUdpDecodeError() }
+                    d.onDecodeError = { consecutive ->
+                        handleDecodeError(consecutive)
+                    }
                     decoder = d
                     val pending = pendingSyncFrame
                     pendingSyncFrame = null
@@ -393,6 +395,38 @@ class MainActivity : ComponentActivity() {
      * this session. Mid-session tears remount ARC VDA and look like random
      * black/green reconnects after long healthy streams.
      */
+    private fun handleDecodeError(consecutiveErrors: Int) {
+        val s = session ?: return
+        val transport = s.activeVideoTransport
+        if (transport == "udp") s.noteUdpDecodeError()
+        when (ChromebookRecoverPolicy.onDecodeError(transport, consecutiveErrors)) {
+            ChromebookRecoverPolicy.Action.RequestKeyframe,
+            ChromebookRecoverPolicy.Action.RebuildCodec,
+            -> {
+                val now = System.currentTimeMillis()
+                if (now - lastDecoderKfAtMs >= 2000) {
+                    lastDecoderKfAtMs = now
+                    s.sendControl(mapOf("type" to "kf"))
+                }
+            }
+            ChromebookRecoverPolicy.Action.TearSession -> {
+                if (allowForcedReconnect()) {
+                    s.forcePeerReconnect("decode errors ($consecutiveErrors)")
+                } else {
+                    android.util.Log.w(
+                        "MainActivity",
+                        "decode error — skipping TCP tear (transport=$transport)",
+                    )
+                    val now = System.currentTimeMillis()
+                    if (now - lastDecoderKfAtMs >= 2000) {
+                        lastDecoderKfAtMs = now
+                        s.sendControl(mapOf("type" to "kf"))
+                    }
+                }
+            }
+        }
+    }
+
     private fun allowForcedReconnect(): Boolean {
         val now = System.currentTimeMillis()
         if (isChromebook &&

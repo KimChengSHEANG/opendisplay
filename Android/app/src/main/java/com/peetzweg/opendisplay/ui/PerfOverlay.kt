@@ -37,7 +37,13 @@ fun PerfOverlay(stats: PerfStats, modifier: Modifier = Modifier) {
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                TransportBadge(stats.transport)
+                TransportBadge(stats.transport, stats.videoTransport)
+                if (stats.videoTransport == "udp" && stats.lossPct != null) {
+                    Metric("loss", "${stats.lossPct.toInt()}%")
+                }
+                if (stats.fecRecoveries > 0) {
+                    Metric("fec", "${stats.fecRecoveries}")
+                }
                 if (stats.totalLatencyP50 > 0) {
                     Metric("total", "${stats.totalLatencyP50.toInt()} ms")
                 }
@@ -76,14 +82,16 @@ fun PerfOverlay(stats: PerfStats, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun TransportBadge(transport: String) {
-    val bg = when (transport) {
-        "USB" -> Color(0xFF2E7D32).copy(alpha = 0.55f)
-        "WiFi" -> Color(0xFF1565C0).copy(alpha = 0.55f)
+private fun TransportBadge(linkTransport: String, videoTransport: String) {
+    val label = if (videoTransport == "udp") "UDP" else linkTransport
+    val bg = when {
+        videoTransport == "udp" -> Color(0xFF6A1B9A).copy(alpha = 0.55f)
+        linkTransport == "USB" -> Color(0xFF2E7D32).copy(alpha = 0.55f)
+        linkTransport == "WiFi" -> Color(0xFF1565C0).copy(alpha = 0.55f)
         else -> Color.Gray.copy(alpha = 0.4f)
     }
     Text(
-        transport,
+        label,
         color = Color.White,
         fontSize = 12.sp,
         fontWeight = FontWeight.Bold,

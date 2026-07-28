@@ -90,6 +90,12 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     private val offsetLock = Any()
     @Volatile private var lastRttMs = 0.0
     @Volatile private var transport = "—"
+    @Volatile private var videoTransport = "tcp"
+    @Volatile private var udpLossPct: Double? = null
+    @Volatile private var udpFecRecoveries = 0
+
+    val activeVideoTransport: String
+        get() = videoTransport
 
     // Mac health piggybacked on Mac→device ping
     @Volatile private var macEncDrops = 0
@@ -173,6 +179,9 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
 
     fun startUdpVideo(port: Int, streamId: Int) {
         stopUdpVideo()
+        videoTransport = "udp"
+        udpLossPct = null
+        udpFecRecoveries = 0
         udpVideoStreamId = streamId
         synchronized(udpStateLock) {
             nackedUdpFrames.clear()
@@ -266,6 +275,9 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         udpVideoReceiver?.stop()
         udpVideoReceiver = null
         udpVideoStreamId = null
+        videoTransport = "tcp"
+        udpLossPct = null
+        udpFecRecoveries = 0
         synchronized(udpStateLock) {
             nackedUdpFrames.clear()
             udpAwaitingKeyframe = true
@@ -294,6 +306,8 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     private fun publishQosWindow() {
         val receiver = udpVideoReceiver ?: return
         val snapshot = receiver.snapshotQosAndReset()
+        udpLossPct = snapshot.lossPct
+        udpFecRecoveries = snapshot.fecRecoveries
         val window = synchronized(udpStateLock) {
             QosWindowCounters(
                 lateFrames = qosLateFramesWindow,
@@ -631,6 +645,9 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
             inputP95 = macInputP95,
             capFps = macCapFps,
             offsetKnown = clockOffsetMs != null,
+            videoTransport = videoTransport,
+            lossPct = if (videoTransport == "udp") udpLossPct else null,
+            fecRecoveries = if (videoTransport == "udp") udpFecRecoveries else 0,
         )
 
         statsReportCounter++
