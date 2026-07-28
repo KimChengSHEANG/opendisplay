@@ -1360,6 +1360,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // without the silence grace and without waiting for a wake.
             Log.info("receiver app closed — ending session")
             Task { @MainActor in self.onPeerClosed?() }
+        case WireMessage.bye:
+            // Diagnostic: receiver is about to close TCP. Do not end the
+            // session here — the socket EOF path already schedules reconnect.
+            let reason = obj["reason"] as? String ?? "?"
+            Log.info("receiver bye: \(reason)")
         default:
             Log.info("unknown control message type: \(type)")
         }

@@ -64,5 +64,6 @@ class FrameCodecTest {
     fun protocolVersion_matchesIos() {
         assertEquals(2, WireProtocol.version)
         assertEquals("hostSleeping", WireMessage.hostSleeping)
+        assertEquals("bye", WireMessage.bye)
     }
 }

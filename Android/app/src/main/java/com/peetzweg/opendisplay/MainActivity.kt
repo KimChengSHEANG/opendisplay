@@ -29,6 +29,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.peetzweg.opendisplay.net.DiscoveryAdvertiser
+import com.peetzweg.opendisplay.session.ChromebookRecoverPolicy
 import com.peetzweg.opendisplay.session.InstallId
 import com.peetzweg.opendisplay.session.PanelMetrics
 import com.peetzweg.opendisplay.session.PerfStats
@@ -95,12 +96,23 @@ class MainActivity : ComponentActivity() {
             recoverAttempt++
             session?.sendControl(mapOf("type" to "kf"))
             if (recoverAttempt >= recoverForceAfterAttempts) {
-                // Phone ~2.5s / Chromebook ~12s of no paint — tear the socket so
-                // Mac reconnects with a fresh SurfaceView + IDR.
+                // Phone ~2.5s / Chromebook ~12s of no paint. Tear TCP only when
+                // still in the post-connect window (stuck first paint). After
+                // that, keep asking for IDRs — mid-session forcePeerReconnect
+                // remounts ARC VDA and flashes black/green while the Mac redials.
                 if (allowForcedReconnect()) {
                     session?.forcePeerReconnect("no video frame rendered after reconnect")
+                } else {
+                    android.util.Log.w(
+                        "MainActivity",
+                        "recover: skipping TCP tear (chromebook=$isChromebook) — keep requesting kf",
+                    )
                 }
                 recoverAttempt = 0
+                // Chromebook mid-session: keep polling; phones stop after the tear attempt.
+                if (isChromebook && session?.isConnected == true) {
+                    scheduleRecover(recoverIntervalMs)
+                }
                 return
             }
             scheduleRecover(recoverIntervalMs)
@@ -125,6 +137,12 @@ class MainActivity : ComponentActivity() {
     private var lastForcedReconnectAtMs: Long = 0
     private var forcedReconnectsWindow = 0
     private var forcedReconnectsWindowStartMs: Long = 0
+    /**
+     * Wall time of the latest TCP connect (diagnostics / future policy).
+     */
+    private var connectedAtMs: Long = 0
+    /** True once the decoder has painted at least one frame this TCP session. */
+    private var paintedThisConnection = false
     private var advertiser: DiscoveryAdvertiser? = null
     private var lockReceiverRegistered = false
     /** True between [onStart] and [onStop]; gates [resumeAccepting] while backgrounded. */
@@ -149,7 +167,7 @@ class MainActivity : ComponentActivity() {
         },
         stopAccepting = {
             cancelRecover()
-            session?.stop()
+            session?.stop(reason = "screenOff/stop")
             connected = false
         },
         resumeAccepting = {
@@ -240,6 +258,11 @@ class MainActivity : ComponentActivity() {
                 onGreenScreen = {
                     if (allowForcedReconnect()) {
                         session?.forcePeerReconnect("green screen detected")
+                    } else {
+                        // Mid-session solid green on Chromebook: ask for IDR in
+                        // place — do not RST the Mac (causes the brief glitch).
+                        android.util.Log.w("MainActivity", "green screen — requesting kf, not TCP tear")
+                        session?.sendControl(mapOf("type" to "kf"))
                     }
                 },
                 onControl = { session?.sendControl(it) },
@@ -344,7 +367,7 @@ class MainActivity : ComponentActivity() {
         // background linger. Real quit still reaches here without that flag.
         if (!isChangingConfigurations) {
             hostSleep.onAppQuitting()
-            session?.stop()
+            session?.stop(reason = "appQuit")
             session = null
             advertiser?.stop()
             advertiser = null
@@ -364,9 +387,18 @@ class MainActivity : ComponentActivity() {
     /**
      * At most 2 forced Mac redials per 30s — enough to clear a green VDA
      * without spinning if the stream is permanently broken.
+     *
+     * Chromebook: only allow TCP tear before the first successful paint of
+     * this session. Mid-session tears remount ARC VDA and look like random
+     * black/green reconnects after long healthy streams.
      */
     private fun allowForcedReconnect(): Boolean {
         val now = System.currentTimeMillis()
+        if (isChromebook &&
+            !ChromebookRecoverPolicy.allowForceReconnect(paintedThisConnection)
+        ) {
+            return false
+        }
         if (now - forcedReconnectsWindowStartMs > 30_000) {
             forcedReconnectsWindowStartMs = now
             forcedReconnectsWindow = 0
@@ -414,6 +446,13 @@ class MainActivity : ComponentActivity() {
         override fun onConnected() {
             runOnUiThread {
                 connected = true
+                connectedAtMs = System.currentTimeMillis()
+                paintedThisConnection = false
+                // Fresh TCP session — don't inherit rate-limit debt from the
+                // previous peer (otherwise a wedged first paint can't tear).
+                forcedReconnectsWindow = 0
+                forcedReconnectsWindowStartMs = connectedAtMs
+                lastForcedReconnectAtMs = 0
                 hostSleep.onConnected()
                 hostDisplayOff = hostSleep.hostDisplayOff
                 window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -458,6 +497,7 @@ class MainActivity : ComponentActivity() {
             }
             // Non-blocking: decode runs on VideoDecoder's thread (iOS-style).
             d.feedAnnexB(data)
+            if (d.hasRendered) paintedThisConnection = true
             // Mid-session VDA death clears hasRendered — re-arm recover so we
             // don't stay black until the user manually reconnects.
             if (!d.hasRendered && session?.isConnected == true) {

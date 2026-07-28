@@ -2,6 +2,7 @@ package com.peetzweg.opendisplay.session
 
 import android.content.Context
 import com.peetzweg.opendisplay.wire.FrameCodec
+import com.peetzweg.opendisplay.wire.WireMessage
 import com.peetzweg.opendisplay.wire.WireProtocol
 import org.json.JSONObject
 import java.io.IOException
@@ -102,7 +103,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         thread.start()
     }
 
-    fun stop() {
+    fun stop(reason: String = "stop") {
         running = false
         listenerHealthy = false
         stopLivenessTimers()
@@ -111,7 +112,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         } catch (_: IOException) {
         }
         serverSocket = null
-        closeClient(notify = false)
+        closeClient(reason = reason, notify = false, announceBye = true)
         acceptThread?.interrupt()
         acceptThread = null
         readThread?.interrupt()
@@ -125,7 +126,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     fun ensureListening() {
         if (running && listenerHealthy) return
         listener.onStatus("listener not healthy — restarting")
-        stop()
+        stop(reason = "ensureListening")
         start()
     }
 
@@ -136,8 +137,8 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
      */
     fun forcePeerReconnect(reason: String) {
         if (clientSocket == null) return
-        android.util.Log.w("ReceiverSession", "forcePeerReconnect: $reason")
-        closeClient(notify = true)
+        logW("forcePeerReconnect: $reason")
+        closeClient(reason = "forcePeerReconnect:$reason", notify = true, announceBye = true)
     }
 
     /** Send control JSON; auto-stamps touch with Mac-clock `t` when synced. */
@@ -211,7 +212,10 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     private fun handleClient(socket: Socket) {
         // Drop previous client without UI disconnect — old readLoop exits after
         // close; clientSocket already replaced so it won't double-notify.
-        closeClient(notify = false)
+        // Do not announce bye: the peer that still owns this socket is being
+        // replaced by a fresh dial; a bye would make that MacSender redial and
+        // fight the new session (WiFi↔ADB migration).
+        closeClient(reason = "acceptReplace", notify = false, announceBye = false)
         try {
             socket.tcpNoDelay = true
             socket.receiveBufferSize = 2 * 1024 * 1024
@@ -236,11 +240,15 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     private fun readLoop(socket: Socket) {
         val deframer = FrameCodec.Deframer()
         val buf = ByteArray(64 * 1024)
+        var eof = false
         try {
             val input = socket.getInputStream()
             while (running) {
                 val n = input.read(buf)
-                if (n < 0) break
+                if (n < 0) {
+                    eof = true
+                    break
+                }
                 lastDataReceivedMs.set(System.currentTimeMillis())
                 synchronized(perfLock) { bytesThisWindow += n }
                 for (frame in deframer.push(buf.copyOf(n))) processFrame(frame)
@@ -248,7 +256,13 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         } catch (_: IOException) {
         } finally {
             if (clientSocket === socket) {
-                closeClient(notify = true)
+                val reason = when {
+                    eof -> "readEOF"
+                    !running -> "readStopped"
+                    else -> "readError"
+                }
+                // Peer already gone — no bye write; still log for logcat.
+                closeClient(reason = reason, notify = true, announceBye = false)
             }
         }
     }
@@ -412,7 +426,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
                 System.currentTimeMillis() - last > WATCHDOG_MS
             ) {
                 listener.onStatus("watchdog: nothing from Mac >5s — dropping")
-                closeClient(notify = true)
+                closeClient(reason = "watchdog", notify = true, announceBye = true)
             }
         }, 1, 1, TimeUnit.SECONDS)
     }
@@ -495,9 +509,22 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         }
     }
 
-    private fun closeClient(notify: Boolean) {
+    /**
+     * Tear down the live Mac socket. [reason] is logged and optionally sent as
+     * `{"type":"bye","reason":…}` so mid-session Chromebook drops are
+     * attributable in `/tmp/opensidecar-mac.log`.
+     */
+    private fun closeClient(reason: String, notify: Boolean, announceBye: Boolean) {
         stopLivenessTimers()
         val had = clientSocket != null
+        if (had) {
+            logW("closeClient reason=$reason notify=$notify announceBye=$announceBye")
+            listener.onStatus("closeClient:$reason")
+            if (announceBye) {
+                // Sync so the Mac can log `bye` before RST — best-effort.
+                sendControlSync(mapOf("type" to WireMessage.bye, "reason" to reason))
+            }
+        }
         try {
             clientSocket?.close()
         } catch (_: IOException) {
@@ -510,8 +537,17 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
 
     private fun nowMs(): Double = System.currentTimeMillis().toDouble()
 
+    /** android.util.Log is unmocked in JVM unit tests — swallow that RuntimeException. */
+    private fun logW(message: String) {
+        try {
+            android.util.Log.w(TAG, message)
+        } catch (_: RuntimeException) {
+        }
+    }
+
     companion object {
         const val DEFAULT_PORT = 9000
+        private const val TAG = "ReceiverSession"
         private const val MAX_SAMPLES = 120
         private const val WATCHDOG_MS = 5_000L
 
