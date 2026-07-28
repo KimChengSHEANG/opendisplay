@@ -68,7 +68,7 @@ enum VideoTransportPreference: String, CaseIterable, Identifiable {
         case .tcp:
             return "Always framed TCP video — safest default for USB and mixed peers."
         case .udp:
-            return "Negotiate UDP video with FEC/NACK on Android/Chromebook WiFi; falls back to TCP mid-session on sustained loss."
+            return "Negotiate UDP video with FEC + IDR recovery on Android/Chromebook WiFi; falls back to TCP mid-session on sustained loss."
         }
     }
 }

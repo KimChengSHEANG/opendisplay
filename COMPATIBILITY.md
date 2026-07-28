@@ -158,9 +158,11 @@ the floor once a force-capable build has spread.
   **ADB over the network** (`adb connect <ip>`), not a USB cable — most
   Chromebooks never show up in `adb devices` when plugged into a Mac.
 - **Protocol 3 (additive):** Android/Chromebook WiFi may negotiate **UDP video**
-  with ~20% Reed–Solomon FEC, NACK retransmit, paced sends, jitter buffer,
-  and qos-driven bitrate. Control JSON stays on TCP. Default `videoTransport`
-  auto selects TCP until the Chromebook keep-UDP gate passes; opt in with
+  with ~20% Reed–Solomon FEC, paced sends, jitter/reorder buffer, IDR recovery
+  via `kf` when FEC cannot rebuild a frame, and qos-driven bitrate
+  (`incompleteRate`, `fecRecoveries`). Control JSON stays on TCP. There is
+  **no** packet NACK / UDP retransmit. Default `videoTransport` auto selects
+  TCP until the Chromebook keep-UDP gate passes; opt in with
   `defaults write com.peetzweg.opensidecar.mac videoTransport udp` or the Mac app
   Settings picker. Sustained high loss falls back to TCP video mid-session.
   USB and iOS remain TCP video.

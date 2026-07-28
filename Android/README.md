@@ -134,8 +134,10 @@ Streaming still uses **WiFi/Ethernet Bonjour**, not the ADB tunnel.
 ## WiFi UDP video (Android / Chromebook)
 
 On WiFi, the Mac and receiver may negotiate **UDP video** (protocol 3) with
-~20% Reed–Solomon FEC, NACK retransmit, paced sends, a small jitter buffer,
-and qos-driven bitrate. Control JSON always stays on the TCP control socket.
+~20% Reed–Solomon FEC, paced sends, a small jitter/reorder buffer, IDR
+recovery (`kf`) when a frame cannot be rebuilt, and qos-driven bitrate.
+Control JSON always stays on the TCP control socket. OpenDisplay does **not**
+retransmit lost UDP video packets (Sunshine-style: FEC first, then keyframe).
 
 | Mac `videoTransport` | Behavior |
 |---|---|
