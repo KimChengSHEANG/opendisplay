@@ -21,6 +21,7 @@ class UdpFrameAssembler {
     )
 
     private var state: FrameState? = null
+    private var latestFrameId: Long? = null
 
     fun offer(datagram: ByteArray): AssembledFrame? {
         val header = UdpVideoProtocol.decodeHeader(datagram) ?: return null
@@ -32,12 +33,16 @@ class UdpFrameAssembler {
 
         var current = state
         if (current == null) {
+            val latest = latestFrameId
+            if (latest != null && !isNewerFrame(header.frameId, latest)) return null
             current = newState(header, parityCount)
             state = current
+            latestFrameId = header.frameId
         } else if (header.frameId != current.frameId) {
             if (!isNewerFrame(header.frameId, current.frameId)) return null
             current = newState(header, parityCount)
             state = current
+            latestFrameId = header.frameId
         } else if (
             current.dataCount != header.dataShardCount ||
             current.parityCount != parityCount ||

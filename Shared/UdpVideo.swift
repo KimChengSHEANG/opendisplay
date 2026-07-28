@@ -85,7 +85,10 @@ enum ReedSolomonFEC {
         return (0..<parityCount).map { parityIndex in
             var parity = Data(count: shardSize)
             for dataIndex in dataShards.indices {
-                let coefficient = gfPow(UInt8(dataIndex + 1), parityIndex + 1)
+                let coefficient = cauchyCoefficient(
+                    dataIndex: dataIndex,
+                    parityShardIndex: dataShards.count + parityIndex
+                )
                 for byteIndex in 0..<shardSize {
                     parity[byteIndex] ^= gfMultiply(dataShards[dataIndex][byteIndex], coefficient)
                 }
@@ -110,16 +113,13 @@ enum ReedSolomonFEC {
         return UInt8(tables.exp[tables.log[Int(left)] + tables.log[Int(right)]])
     }
 
-    private static func gfPow(_ base: UInt8, _ exponent: Int) -> UInt8 {
-        var result: UInt8 = 1
-        var factor = base
-        var power = exponent
-        while power > 0 {
-            if power & 1 != 0 { result = gfMultiply(result, factor) }
-            factor = gfMultiply(factor, factor)
-            power >>= 1
-        }
-        return result
+    private static func cauchyCoefficient(
+        dataIndex: Int,
+        parityShardIndex: Int
+    ) -> UInt8 {
+        let value = dataIndex ^ parityShardIndex
+        precondition(value != 0)
+        return UInt8(tables.exp[255 - tables.log[value]])
     }
 }
 

@@ -8,6 +8,26 @@ import org.junit.Test
 
 class UdpVideoFecTest {
     @Test
+    fun reedSolomon_recoversSixteenPlusFourCounterexample() {
+        val data = Array(16) { shard ->
+            ByteArray(64) { byte -> (shard * 31 + byte * 17).toByte() }
+        }
+        val parity = ReedSolomon.encode(data, parityCount = 4)
+        val received = arrayOfNulls<ByteArray>(20)
+        for (index in data.indices) received[index] = data[index]
+        for (index in parity.indices) received[data.size + index] = parity[index]
+
+        received[0] = null
+        received[1] = null
+        received[2] = null
+        received[18] = null
+
+        val decoded = ReedSolomon.decode(received, dataCount = data.size)
+        assertNotNull(decoded)
+        for (index in data.indices) assertArrayEquals(data[index], decoded!![index])
+    }
+
+    @Test
     fun packageAndAssemble_roundTripWithoutLoss() {
         val au = ByteArray(2500) { i -> (i % 251).toByte() }
         val packaged = UdpVideoPackager.packageFrame(
@@ -60,6 +80,74 @@ class UdpVideoFecTest {
         assertNotNull(out)
         assertArrayEquals(au, out!!.annexB)
         assertEquals(true, out.recoveredByFec)
+    }
+
+    @Test
+    fun assemble_recoversMultipleDataErasuresWithMixedParityLossAndReordering() {
+        val au = ByteArray(8000) { i -> (i * 29 % 251).toByte() }
+        val packaged = UdpVideoPackager.packageFrame(
+            au = au,
+            frameId = 10L,
+            startSeq = 20,
+            keyframe = false,
+            fecPct = 50,
+            captureMs = 3L,
+            sendMs = 4L,
+        )
+        val retained = packaged.packets.filter { packet ->
+            val header = UdpVideoProtocol.decodeHeader(packet.datagram)!!
+            header.shardIndex !in setOf(1, 4, header.dataShardCount)
+        }.reversed()
+
+        val assembler = UdpFrameAssembler()
+        var out: UdpFrameAssembler.AssembledFrame? = null
+        for (packet in retained) {
+            assembler.offer(packet.datagram)?.let { out = it }
+        }
+
+        assertNotNull(out)
+        assertArrayEquals(au, out!!.annexB)
+        assertEquals(true, out.recoveredByFec)
+    }
+
+    @Test
+    fun assemble_rejectsDelayedPacketsAfterFrameDelivery() {
+        val first = UdpVideoPackager.packageFrame(
+            au = ByteArray(1600) { it.toByte() },
+            frameId = 20L,
+            startSeq = 0,
+            keyframe = false,
+            fecPct = 20,
+            captureMs = 5L,
+            sendMs = 6L,
+        )
+        val secondAu = ByteArray(1700) { (it * 7).toByte() }
+        val second = UdpVideoPackager.packageFrame(
+            au = secondAu,
+            frameId = 21L,
+            startSeq = first.nextSeq,
+            keyframe = true,
+            fecPct = 20,
+            captureMs = 7L,
+            sendMs = 8L,
+        )
+        val assembler = UdpFrameAssembler()
+        var firstOut: UdpFrameAssembler.AssembledFrame? = null
+        for (packet in first.packets) {
+            assembler.offer(packet.datagram)?.let { firstOut = it }
+        }
+        assertNotNull(firstOut)
+
+        for (packet in first.packets.reversed()) {
+            assertNull(assembler.offer(packet.datagram))
+        }
+
+        var secondOut: UdpFrameAssembler.AssembledFrame? = null
+        for (packet in second.packets.reversed()) {
+            assembler.offer(packet.datagram)?.let { secondOut = it }
+        }
+        assertNotNull(secondOut)
+        assertArrayEquals(secondAu, secondOut!!.annexB)
     }
 
     @Test

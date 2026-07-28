@@ -26,7 +26,7 @@ object ReedSolomon {
         return Array(parityCount) { parityIndex ->
             ByteArray(shardSize).also { parity ->
                 for (dataIndex in dataShards.indices) {
-                    val coefficient = gfPow(dataIndex + 1, parityIndex + 1)
+                    val coefficient = cauchyCoefficient(dataIndex, dataShards.size + parityIndex)
                     for (byteIndex in 0 until shardSize) {
                         parity[byteIndex] =
                             gfAdd(parity[byteIndex], gfMul(dataShards[dataIndex][byteIndex], coefficient))
@@ -62,7 +62,8 @@ object ReedSolomon {
                 } else {
                     val parityIndex = shardIndex - dataCount
                     for (column in 0 until dataCount) {
-                        coefficients[column] = gfPow(column + 1, parityIndex + 1).toInt() and 0xFF
+                        coefficients[column] =
+                            cauchyCoefficient(column, dataCount + parityIndex).toInt() and 0xFF
                     }
                 }
             }
@@ -136,15 +137,6 @@ object ReedSolomon {
         return exp[255 - log[unsigned]].toByte()
     }
 
-    private fun gfPow(base: Int, exponent: Int): Byte {
-        var result: Byte = 1
-        var factor = (base and 0xFF).toByte()
-        var power = exponent
-        while (power > 0) {
-            if (power and 1 != 0) result = gfMul(result, factor)
-            factor = gfMul(factor, factor)
-            power = power shr 1
-        }
-        return result
-    }
+    private fun cauchyCoefficient(dataIndex: Int, parityShardIndex: Int): Byte =
+        gfInverse((dataIndex xor parityShardIndex).toByte())
 }
