@@ -1,14 +1,17 @@
-# SDD Progress — Android/Chromebook WiFi UDP transport
+# SDD Progress — Sunshine UDP (Android/Chromebook)
 
-Branch: udp-wifi-transport
-Plan: docs/superpowers/plans/2026-07-28-android-wifi-udp-transport.md
-Merge-base: 60615eb0fd2353c7c2123403d00a26b162782aea
-Started-from: 60615eb
+Branch: sunshine-udp-android
+Plan: superpowers/plans/2026-07-28-sunshine-udp-android-chromebook.md
+Spec: superpowers/SUNSHINE_UDP_NOTES.md
+Merge-base: 29ecd6a
+Started-from: kim @ 29ecd6a
 
 ## Tasks
-Task 1: IN PROGRESS
-Task 2: NOT STARTED
-Task 3: NOT STARTED
-Task 4: NOT STARTED
-Task 5: NOT STARTED
-Task 6: NOT STARTED
+Task 1: NOT STARTED — Spec + Protocol V3 + packet header
+Task 2: NOT STARTED — Reed–Solomon FEC + packager/assembler
+Task 3: NOT STARTED — Negotiate UDP video / TCP control
+Task 4: NOT STARTED — Paced Mac sender + retransmit cache
+Task 5: NOT STARTED — Jitter buffer, late drops, NACK
+Task 6: NOT STARTED — Adaptive bitrate, qos, keyframe policy
+Task 7: NOT STARTED — Decoder integration + Chromebook harden
+Task 8: NOT STARTED — Fallback, settings, docs, baseline gate
