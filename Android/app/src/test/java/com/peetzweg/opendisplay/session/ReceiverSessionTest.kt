@@ -35,6 +35,32 @@ class ReceiverSessionTest {
     }
 
     @Test
+    fun shouldOfferUdpVideo_loopbackOrUsbOmitsUdp() {
+        assertFalse(ReceiverSession.shouldOfferUdpVideo(isLoopback = true, udpVideoEnabled = true))
+        assertFalse(ReceiverSession.shouldOfferUdpVideo(isLoopback = true, udpVideoEnabled = false))
+    }
+
+    @Test
+    fun shouldOfferUdpVideo_wifiOffersWhenEnabled() {
+        assertTrue(ReceiverSession.shouldOfferUdpVideo(isLoopback = false, udpVideoEnabled = true))
+        assertFalse(ReceiverSession.shouldOfferUdpVideo(isLoopback = false, udpVideoEnabled = false))
+    }
+
+    @Test
+    fun helloJson_loopbackOmitsUdpVideoFields() {
+        val offersUdp = ReceiverSession.shouldOfferUdpVideo(isLoopback = true, udpVideoEnabled = true)
+        val json = ReceiverSession.helloJson(
+            wide = 1920, high = 1080, scale = 1.0,
+            device = "Android", id = "usb", pv = 3,
+            videoTransports = if (offersUdp) listOf("tcp", "udp") else null,
+            udpPort = if (offersUdp) ReceiverSession.DEFAULT_UDP_PORT else null,
+        )
+        val obj = JSONObject(json)
+        assertFalse(obj.has("video"))
+        assertFalse(obj.has("udpPort"))
+    }
+
+    @Test
     fun helloJson_androidOffersUdpVideo() {
         val json = ReceiverSession.helloJson(
             wide = 1920, high = 1080, scale = 1.0,
@@ -112,7 +138,9 @@ class ReceiverSessionTest {
         }
         assertEquals("udp", selected["video"])
         assertEquals(7, selected["streamId"])
+        assertEquals(7, session.udpVideoStreamId)
         session.stopUdpVideo()
+        assertEquals(null, session.udpVideoStreamId)
     }
 
     @Test

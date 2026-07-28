@@ -24,7 +24,10 @@ class UdpVideoReceiver(port: Int) {
                     socket.receive(packet)
                     onDatagram(packet.data.copyOfRange(packet.offset, packet.offset + packet.length))
                 } catch (error: IOException) {
-                    if (running) throw error
+                    if (running) {
+                        logW("receive failed: ${error.message}")
+                    }
+                    break
                 }
             }
         }, "UdpVideoReceiver").apply {
@@ -40,7 +43,15 @@ class UdpVideoReceiver(port: Int) {
         receiveThread = null
     }
 
+    private fun logW(message: String) {
+        try {
+            android.util.Log.w(TAG, message)
+        } catch (_: RuntimeException) {
+        }
+    }
+
     private companion object {
+        const val TAG = "UdpVideoReceiver"
         const val MAX_DATAGRAM_SIZE = 65_535
     }
 }

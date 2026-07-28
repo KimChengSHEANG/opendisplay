@@ -69,6 +69,8 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     private var pingFuture: ScheduledFuture<*>? = null
     private var watchdogFuture: ScheduledFuture<*>? = null
     private var udpVideoReceiver: UdpVideoReceiver? = null
+    var udpVideoStreamId: Int? = null
+        private set
 
     // --- Liveness / clock sync (iOS PhoneReceiver) ---
     private val lastDataReceivedMs = AtomicLong(0L)
@@ -160,11 +162,12 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
 
     fun startUdpVideo(port: Int, streamId: Int) {
         stopUdpVideo()
+        udpVideoStreamId = streamId
         udpVideoReceiver = UdpVideoReceiver(port).also { receiver ->
             receiver.start {
                 // Datagram assembly and decode delivery land in Tasks 4–5.
                 @Suppress("UNUSED_VARIABLE")
-                val negotiatedStreamId = streamId
+                val negotiatedStreamId = udpVideoStreamId
             }
         }
     }
@@ -172,6 +175,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     fun stopUdpVideo() {
         udpVideoReceiver?.stop()
         udpVideoReceiver = null
+        udpVideoStreamId = null
     }
 
     /**
@@ -555,8 +559,10 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     }
 
     private fun sendHello() {
-        val offersUdp = udpVideoEnabled &&
-            clientSocket?.inetAddress?.isLoopbackAddress == false
+        val offersUdp = shouldOfferUdpVideo(
+            isLoopback = clientSocket?.inetAddress?.isLoopbackAddress == true,
+            udpVideoEnabled = udpVideoEnabled,
+        )
         sendFrame(
             helloJson(
                 pixelsWide,
@@ -631,6 +637,9 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         private const val TAG = "ReceiverSession"
         private const val MAX_SAMPLES = 120
         private const val WATCHDOG_MS = 5_000L
+
+        fun shouldOfferUdpVideo(isLoopback: Boolean, udpVideoEnabled: Boolean): Boolean =
+            udpVideoEnabled && !isLoopback
 
         fun helloJson(
             wide: Int,
