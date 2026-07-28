@@ -16,7 +16,7 @@ final class VideoRateController {
         self.bitrate = max(2_000_000, initialBitrate)
     }
 
-    func next(lossPct: Double, jitterMs: Double, nackRate: Double) -> RateAction {
+    func next(lossPct: Double, jitterMs: Double, incompleteRate: Double) -> RateAction {
         if lossPct >= 20 {
             return RateAction(bitrate: nil, forceKeyframe: true, preferTcpNextSession: true)
         }
@@ -24,7 +24,7 @@ final class VideoRateController {
             bitrate = max(4_000_000, bitrate - 2_000_000)
             return RateAction(bitrate: bitrate, forceKeyframe: false, preferTcpNextSession: false)
         }
-        if nackRate > 0.15 {
+        if incompleteRate > 0.15 {
             return RateAction(bitrate: nil, forceKeyframe: true, preferTcpNextSession: false)
         }
         if lossPct < 2 && jitterMs < 15 {

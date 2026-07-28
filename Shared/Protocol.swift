@@ -34,6 +34,5 @@ enum WireMessage {
     static let bye = "bye"                          // phone -> Mac: about to close TCP; `reason` explains why
     static let transportOffer = "transportOffer"
     static let transportSelected = "transportSelected"
-    static let nack = "nack"
     static let qos = "qos"
 }

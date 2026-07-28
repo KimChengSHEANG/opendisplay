@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-/// Paced UDP video sender with retransmit cache for NACK recovery.
+/// Paced UDP video sender with Reed-Solomon FEC (no packet retransmit).
 ///
 /// State is guarded by `stateLock` — never `queue.sync`. SCK delivers frames on
 /// `sender.video`, and VT often emits the encode callback while that queue is
@@ -25,9 +25,6 @@ final class UdpVideoSender {
     private let maxPaceDelayMs = 4.0
     private var encodeBitrate: Int = 18_000_000
     private var fecPct: Int = UdpVideoProtocol.defaultFecPct
-    private var retransmitCache: [UInt16: Data] = [:]
-    private var retransmitCacheOrder: [UInt16] = []
-    private let retransmitCacheLimit = 2048
     private var ready = false
 
     var pendingCount: Int {
@@ -154,9 +151,6 @@ final class UdpVideoSender {
         }
         nextFrameId = frameId &+ 1
         nextSeq = packaged.nextSeq
-        for pkt in packaged.packets {
-            cacheLocked(seq: pkt.seq, datagram: pkt.datagram)
-        }
         pendingDatagrams += datagramCount
         let bitrate = encodeBitrate
         let fec = self.fecPct
@@ -167,31 +161,6 @@ final class UdpVideoSender {
             self?.paceDatagrams(datagrams, on: connection, bitrate: bitrate, fecPct: fec)
         }
         return true
-    }
-
-    func handleNack(missing: [UInt16]) {
-        stateLock.lock()
-        guard let connection, ready else {
-            stateLock.unlock()
-            return
-        }
-        var datagrams: [Data] = []
-        for seq in missing {
-            if let dgram = retransmitCache[seq] {
-                datagrams.append(dgram)
-            }
-        }
-        guard !datagrams.isEmpty else {
-            stateLock.unlock()
-            return
-        }
-        pendingDatagrams += datagrams.count
-        let bitrate = encodeBitrate
-        let fec = fecPct
-        stateLock.unlock()
-        queue.async { [weak self] in
-            self?.paceDatagrams(datagrams, on: connection, bitrate: bitrate, fecPct: fec)
-        }
     }
 
     // MARK: - Internals
@@ -212,21 +181,8 @@ final class UdpVideoSender {
         pendingDatagrams = 0
         nextSeq = 0
         nextFrameId = 1
-        retransmitCache.removeAll()
-        retransmitCacheOrder.removeAll()
         stateLock.unlock()
         conn?.cancel()
-    }
-
-    private func cacheLocked(seq: UInt16, datagram: Data) {
-        if retransmitCache[seq] == nil {
-            retransmitCacheOrder.append(seq)
-        }
-        retransmitCache[seq] = datagram
-        while retransmitCacheOrder.count > retransmitCacheLimit {
-            let evicted = retransmitCacheOrder.removeFirst()
-            retransmitCache.removeValue(forKey: evicted)
-        }
     }
 
     private func bytesPerMs(bitrate: Int, fecPct: Int) -> Int {

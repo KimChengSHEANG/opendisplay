@@ -1365,9 +1365,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard videoViaUdp || udpSelectedAwaitingReady else { break }
             let lossPct = (obj["lossPct"] as? NSNumber)?.doubleValue ?? 0
             let jitterMs = (obj["jitterMs"] as? NSNumber)?.doubleValue ?? 0
-            let nackRate = (obj["nackRate"] as? NSNumber)?.doubleValue ?? 0
+            let incompleteRate = (obj["incompleteRate"] as? NSNumber)?.doubleValue
+                ?? (obj["nackRate"] as? NSNumber)?.doubleValue
+                ?? 0
             guard let controller = videoRateController else { break }
-            let action = controller.next(lossPct: lossPct, jitterMs: jitterMs, nackRate: nackRate)
+            let action = controller.next(lossPct: lossPct, jitterMs: jitterMs, incompleteRate: incompleteRate)
             if let newBitrate = action.bitrate {
                 applyEncodeBitrate(newBitrate)
             }
@@ -1381,17 +1383,6 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 UserDefaults.standard.set("tcp", forKey: "videoTransport")
                 Log.info("QoS: falling back to TCP mid-session (loss=\(lossPct)%)")
                 fallbackToTcpVideo(reason: "qos loss")
-            }
-        case WireMessage.nack:
-            let nackStreamId = (obj["streamId"] as? NSNumber)?.uint32Value
-            guard videoViaUdp, nackStreamId == udpStreamId else { break }
-            let missing = (obj["missing"] as? [Any])?.compactMap { value -> UInt16? in
-                if let n = value as? NSNumber { return n.uint16Value }
-                if let i = value as? Int, i >= 0, i <= Int(UInt16.max) { return UInt16(i) }
-                return nil
-            } ?? []
-            if !missing.isEmpty {
-                udpVideoSender?.handleNack(missing: missing)
             }
         case "touch":
             if let phase = obj["phase"] as? String,
