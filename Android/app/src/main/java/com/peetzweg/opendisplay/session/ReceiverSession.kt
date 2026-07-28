@@ -71,6 +71,8 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     private var udpVideoReceiver: UdpVideoReceiver? = null
     var udpVideoStreamId: Int? = null
         private set
+    private val nackedUdpFrames = HashSet<Long>()
+    private var udpAwaitingKeyframe = true
 
     // --- Liveness / clock sync (iOS PhoneReceiver) ---
     private val lastDataReceivedMs = AtomicLong(0L)
@@ -163,19 +165,73 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     fun startUdpVideo(port: Int, streamId: Int) {
         stopUdpVideo()
         udpVideoStreamId = streamId
+        nackedUdpFrames.clear()
+        udpAwaitingKeyframe = true
         udpVideoReceiver = UdpVideoReceiver(port).also { receiver ->
-            receiver.start {
-                // Datagram assembly and decode delivery land in Tasks 4–5.
-                @Suppress("UNUSED_VARIABLE")
-                val negotiatedStreamId = udpVideoStreamId
-            }
+            receiver.start(
+                object : UdpVideoReceiver.Callbacks {
+                    override fun onVideoFrame(
+                        annexB: ByteArray,
+                        captureMs: Long,
+                        sendMs: Long,
+                        isKeyframe: Boolean,
+                    ) {
+                        noteVideoFrame(captureMs.toDouble(), sendMs.toDouble())
+                        listener.onVideoFrame(annexB)
+                        if (isKeyframe) udpAwaitingKeyframe = false
+                    }
+
+                    override fun onIncomplete(frameId: Long, missingSeqs: IntArray, isKeyframe: Boolean) {
+                        handleUdpIncomplete(streamId, frameId, missingSeqs, isKeyframe)
+                    }
+
+                    override fun onLateDrop(frameId: Long) {
+                        handleUdpLateDrop(frameId)
+                    }
+                },
+            )
         }
+    }
+
+    private fun handleUdpIncomplete(
+        streamId: Int,
+        frameId: Long,
+        missingSeqs: IntArray,
+        isKeyframe: Boolean,
+    ) {
+        if (missingSeqs.isEmpty()) return
+        val needKeyframe = shouldRequestKeyframeAfterUdpLoss(isKeyframe)
+        if (nackedUdpFrames.add(frameId)) {
+            sendControl(
+                mapOf(
+                    "type" to WireMessage.nack,
+                    "streamId" to streamId,
+                    "missing" to missingSeqs.toList(),
+                ),
+            )
+        }
+        udpAwaitingKeyframe = true
+        if (needKeyframe) {
+            sendControl(mapOf("type" to "kf"))
+        }
+    }
+
+    private fun handleUdpLateDrop(frameId: Long) {
+        udpAwaitingKeyframe = true
+        sendControl(mapOf("type" to "kf"))
+    }
+
+    private fun shouldRequestKeyframeAfterUdpLoss(incompleteWasKeyframe: Boolean): Boolean {
+        if (incompleteWasKeyframe) return true
+        return udpAwaitingKeyframe
     }
 
     fun stopUdpVideo() {
         udpVideoReceiver?.stop()
         udpVideoReceiver = null
         udpVideoStreamId = null
+        nackedUdpFrames.clear()
+        udpAwaitingKeyframe = true
     }
 
     /**

@@ -1344,6 +1344,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 udpStreamId = nil
                 Log.info("TCP video selected")
             }
+        case WireMessage.nack:
+            let nackStreamId = (obj["streamId"] as? NSNumber)?.uint32Value
+            guard videoViaUdp, nackStreamId == udpStreamId else { break }
+            let missing = (obj["missing"] as? [Any])?.compactMap { value -> UInt16? in
+                if let n = value as? NSNumber { return n.uint16Value }
+                if let i = value as? Int, i >= 0, i <= Int(UInt16.max) { return UInt16(i) }
+                return nil
+            } ?? []
+            if !missing.isEmpty {
+                udpVideoSender?.handleNack(missing: missing)
+            }
         case "touch":
             if let phase = obj["phase"] as? String,
                let x = obj["x"] as? Double,
