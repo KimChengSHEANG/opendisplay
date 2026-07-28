@@ -28,7 +28,11 @@ Android/Chromebook WiFi video over UDP. TCP control on :9000. iOS + USB TCP unch
 Flags: KEYFRAME 0x01, FEC_PARITY 0x02, START 0x04, END 0x08.
 
 ## Recovery
-- FEC: ~20% Reed–Solomon parity shards per frame (Sunshine default).
-- NACK: `{"type":"nack","streamId":N,"missing":[seq,...]}` over TCP; Mac retransmits from cache.
-- Late/incomplete frames are dropped; receiver requests `kf` when reference chain breaks.
-- `qos`: `{"type":"qos","lossPct":…,"jitterMs":…,"nackRate":…,"lateFrames":…}` ~2Hz for AIMD bitrate.
+
+Sunshine/Moonlight model (not WebRTC):
+
+- **FEC first:** ~20% Reed–Solomon parity shards per video frame (`fecPct`, Sunshine `fec_percentage` default). Receiver reconstructs missing data shards from parity when possible.
+- **No packet NACK:** Do **not** send `{"type":"nack",...}` and do **not** cache/retransmit UDP datagrams. Late shards may still arrive within a short reorder window; after that the frame is abandoned.
+- **IDR recovery:** When a frame is incomplete after the reorder window, late-dropped, or a decode error breaks the reference chain, receiver sends `{"type":"kf"}` over TCP. Mac forces an IDR.
+- **Disposable frames:** Prefer forward progress over perfect delivery; incomplete/late frames are dropped.
+- **`qos` (~2Hz):** `{"type":"qos","lossPct":…,"jitterMs":…,"incompleteRate":…,"lateFrames":…,"fecRecoveries":…}` for AIMD bitrate and TCP fallback. `incompleteRate` = incompleteFrames / frames in the window (0 if frames == 0).

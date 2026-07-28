@@ -5,7 +5,7 @@ Sunshine/Moonlight is fast and stable over UDP because it is not using "naive UD
 ## Big Reasons
 
 - Video frames are treated as disposable when needed. For interactive streaming, a late frame is often worse than a lost frame, so the stack prefers forward progress over perfect delivery.
-- Reliability is added selectively instead of globally. Sequence numbers, timestamps, frame boundaries, loss detection, retransmit strategies, FEC, and frequent keyframe recovery help without forcing the whole stream to stall.
+- Reliability is added selectively instead of globally. Sequence numbers, timestamps, frame boundaries, loss detection, Reed–Solomon FEC, and fast IDR/keyframe recovery help without forcing the whole stream to stall. Sunshine does **not** rely on classic packet NACK retransmit for video; FEC absorbs small losses, then the client requests encoder-level recovery (IDR / RFI) over the control channel.
 - Control traffic is kept separate from bulk video traffic. Input, keepalives, session control, and wake/sleep signals avoid getting stuck behind queued video data.
 - Bitrate and packet pacing are tuned for real networks. Good pacing and congestion handling reduce burstiness and make home WiFi behave much better.
 - The encoder is configured for low latency. Hardware encode, small encoder buffers, minimal frame reordering, and fast keyframe recovery reduce both latency and recovery time.
