@@ -16,6 +16,5 @@ object WireMessage {
     const val bye = "bye"
     const val transportOffer = "transportOffer"
     const val transportSelected = "transportSelected"
-    const val nack = "nack"
     const val qos = "qos"
 }

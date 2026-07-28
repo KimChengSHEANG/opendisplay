@@ -200,4 +200,23 @@ class ReceiverSessionTest {
         assertEquals(1080, session.pixelsWide)
         assertEquals(2400, session.pixelsHigh)
     }
+
+    @Test
+    fun udp_incomplete_requests_kf_not_nack() {
+        val sent = mutableListOf<Map<String, Any>>()
+        val session = ReceiverSession(listener = noopListener)
+        session.testHookSendControl = { sent += it }
+
+        session.testHookUdpIncomplete(
+            streamId = 7,
+            frameId = 42L,
+            missingSeqs = intArrayOf(9002, 9003),
+            isKeyframe = false,
+        )
+
+        val types = sent.map { it["type"] as String }
+        assertTrue(types.contains("kf"))
+        assertFalse(types.contains("nack"))
+        assertFalse(sent.any { it.containsKey("missing") })
+    }
 }

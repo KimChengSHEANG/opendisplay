@@ -73,14 +73,13 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     private var udpVideoReceiver: UdpVideoReceiver? = null
     var udpVideoStreamId: Int? = null
         private set
-    private val nackedUdpFrames = HashSet<Long>()
+    private val idrRequestedUdpFrames = HashSet<Long>()
     @Volatile private var udpAwaitingKeyframe = true
     @Volatile private var preferTcpVideo = false
     private val udpStateLock = Any()
     private var qosLateFramesWindow = 0
     private var qosIncompleteFramesWindow = 0
     private var qosDecodeErrorsWindow = 0
-    private var qosNacksWindow = 0
     private var qosFramesWindow = 0
     private val fallbackTracker = UdpHealthPolicy.FallbackTracker()
 
@@ -185,12 +184,11 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         udpFecRecoveries = 0
         udpVideoStreamId = streamId
         synchronized(udpStateLock) {
-            nackedUdpFrames.clear()
+            idrRequestedUdpFrames.clear()
             udpAwaitingKeyframe = true
             qosLateFramesWindow = 0
             qosIncompleteFramesWindow = 0
             qosDecodeErrorsWindow = 0
-            qosNacksWindow = 0
             qosFramesWindow = 0
             fallbackTracker.reset()
         }
@@ -213,6 +211,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
                         if (isKeyframe) {
                             synchronized(udpStateLock) {
                                 udpAwaitingKeyframe = false
+                                idrRequestedUdpFrames.clear()
                             }
                         }
                     }
@@ -245,18 +244,9 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         if (missingSeqs.isEmpty()) return
         val needKeyframe = synchronized(udpStateLock) {
             val need = shouldRequestKeyframeAfterUdpLoss(isKeyframe)
-            if (nackedUdpFrames.add(frameId)) {
-                qosNacksWindow++
-                sendControl(
-                    mapOf(
-                        "type" to WireMessage.nack,
-                        "streamId" to streamId,
-                        "missing" to missingSeqs.toList(),
-                    ),
-                )
-            }
+            val firstForFrame = idrRequestedUdpFrames.add(frameId)
             udpAwaitingKeyframe = true
-            need
+            need || firstForFrame
         }
         if (needKeyframe) {
             sendControl(mapOf("type" to "kf"))
@@ -284,12 +274,11 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         udpLossPct = null
         udpFecRecoveries = 0
         synchronized(udpStateLock) {
-            nackedUdpFrames.clear()
+            idrRequestedUdpFrames.clear()
             udpAwaitingKeyframe = true
             qosLateFramesWindow = 0
             qosIncompleteFramesWindow = 0
             qosDecodeErrorsWindow = 0
-            qosNacksWindow = 0
             qosFramesWindow = 0
             fallbackTracker.reset()
         }
@@ -318,13 +307,11 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
                 lateFrames = qosLateFramesWindow,
                 incompleteFrames = qosIncompleteFramesWindow,
                 decodeErrors = qosDecodeErrorsWindow,
-                nacks = qosNacksWindow,
                 frames = qosFramesWindow,
             ).also {
                 qosLateFramesWindow = 0
                 qosIncompleteFramesWindow = 0
                 qosDecodeErrorsWindow = 0
-                qosNacksWindow = 0
                 qosFramesWindow = 0
             }
         }
@@ -371,11 +358,17 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
 
     internal fun fallbackToTcpVideoForTest(streamId: Int) = fallbackToTcpVideo(streamId)
 
+    internal fun testHookUdpIncomplete(
+        streamId: Int,
+        frameId: Long,
+        missingSeqs: IntArray,
+        isKeyframe: Boolean,
+    ) = handleUdpIncomplete(streamId, frameId, missingSeqs, isKeyframe)
+
     private data class QosWindowCounters(
         val lateFrames: Int,
         val incompleteFrames: Int,
         val decodeErrors: Int,
-        val nacks: Int,
         val frames: Int,
     )
 
