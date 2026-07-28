@@ -35,6 +35,22 @@ class ReceiverSessionTest {
     }
 
     @Test
+    fun helloJson_androidOffersUdpVideo() {
+        val json = ReceiverSession.helloJson(
+            wide = 1920, high = 1080, scale = 1.0,
+            device = "Chromebook", id = "xyz", pv = 3,
+            videoTransports = listOf("tcp", "udp"),
+            udpPort = 9001,
+        )
+        val obj = JSONObject(json)
+        assertEquals(3, obj.getInt("pv"))
+        assertEquals(9001, obj.getInt("udpPort"))
+        val video = obj.getJSONArray("video")
+        assertEquals("tcp", video.getString(0))
+        assertEquals("udp", video.getString(1))
+    }
+
+    @Test
     fun isVideoFrame_plainAnnexBWithoutBraceIsVideo() {
         val payload = byteArrayOf(0, 0, 0, 1, 0x67, 0x42)
         assertTrue(ReceiverSession.isVideoFrame(payload))
@@ -72,6 +88,31 @@ class ReceiverSessionTest {
         override fun onVideoFrame(data: ByteArray) {}
         override fun onControl(map: Map<String, Any>) {}
         override fun onStatus(status: String) {}
+    }
+
+    @Test
+    fun selects_udp_when_transport_offer_arrives() {
+        val sent = mutableListOf<Map<String, Any>>()
+        val session = ReceiverSession(listener = noopListener)
+        session.testHookSendControl = { sent += it }
+
+        session.handleControlForTest(
+            mapOf(
+                "type" to com.peetzweg.opendisplay.wire.WireMessage.transportOffer,
+                "video" to listOf("udp", "tcp"),
+                "control" to "tcp",
+                "udpPort" to 9001,
+                "streamId" to 7,
+                "fecPct" to 20,
+            ),
+        )
+
+        val selected = sent.single {
+            it["type"] == com.peetzweg.opendisplay.wire.WireMessage.transportSelected
+        }
+        assertEquals("udp", selected["video"])
+        assertEquals(7, selected["streamId"])
+        session.stopUdpVideo()
     }
 
     @Test

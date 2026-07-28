@@ -175,6 +175,8 @@ struct PhoneInfo: Decodable {
                           // across USB and WiFi
     let pv: Int?          // receiver protocol version (issue #132); absent on
                           // every pre-handshake install → treat as protocol 1
+    let video: [String]?
+    let udpPort: UInt16?
 
     var kind: String { device ?? "device" }
     var protocolVersion: Int { pv ?? WireProtocol.assumedWhenAbsent }
@@ -212,6 +214,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
     private var encoder: VTCompressionSession?
     private var connection: NWConnection?
+    private var udpVideoSender: UdpVideoSender?
+    private var udpStreamId: UInt32?
     private var virtualDisplay: VirtualDisplay?
     private let queue = DispatchQueue(label: "sender.video")
     private let startCode: [UInt8] = [0, 0, 0, 1]
@@ -691,6 +695,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         virtualDisplay = nil
         connection?.cancel()
         connection = nil
+        udpVideoSender?.stop()
+        udpVideoSender = nil
+        udpStreamId = nil
 
         queue.async { [weak self] in
             guard let self else { return }
@@ -738,6 +745,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.dialGeneration += 1   // a dial still in flight must not adopt
             self.connection?.cancel()
             self.connection = nil
+            self.udpVideoSender?.stop()
+            self.udpVideoSender = nil
+            self.udpStreamId = nil
             self.pendingSends = 0
             self.pipelineLock.lock()
             self.pendingEncodes = 0
@@ -1026,6 +1036,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let generation = dialGeneration
         connection?.cancel()
         connection = nil
+        udpVideoSender?.stop()
+        udpVideoSender = nil
+        udpStreamId = nil
         pendingSends = 0
         pipelineLock.lock()
         pendingEncodes = 0
@@ -1278,6 +1291,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // message types. Sending on every hello is idempotent — the
                 // phone dedupes by content.
                 sendWelcome()
+                negotiateUdpVideo(with: info)
                 if info.protocolVersion < WireProtocol.minSupportedPeer {
                     Log.info("receiver protocol \(info.protocolVersion) below supported \(WireProtocol.minSupportedPeer) — requesting update")
                     sendUpdateRequired(kind: info.kind)
@@ -1310,6 +1324,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         self.encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
                     }
                 }
+            }
+        case WireMessage.transportSelected:
+            let selected = obj["video"] as? String
+            let selectedStreamId = (obj["streamId"] as? NSNumber)?.uint32Value
+            if selected == "udp", selectedStreamId == udpStreamId {
+                Log.info("UDP video selected (stream \(selectedStreamId ?? 0)); TCP remains control")
+            } else {
+                udpVideoSender?.stop()
+                udpVideoSender = nil
+                udpStreamId = nil
+                Log.info("TCP video selected")
             }
         case "touch":
             if let phase = obj["phase"] as? String,
@@ -1673,6 +1698,55 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         sendJSONFrame("{\"type\":\"\(WireMessage.welcome)\",\"pv\":\(WireProtocol.version),\"min\":\(WireProtocol.minSupportedPeer)}")
     }
 
+    private func negotiateUdpVideo(with info: PhoneInfo) {
+        udpVideoSender?.stop()
+        udpVideoSender = nil
+        udpStreamId = nil
+
+        guard info.kind == "Android" || info.kind == "Chromebook",
+              info.video?.contains("udp") == true,
+              let rawPort = info.udpPort,
+              let port = NWEndpoint.Port(rawValue: rawPort),
+              udpPreferenceAllowsNegotiation(),
+              let host = udpPeerHost(),
+              !Self.isLoopbackHost(host) else {
+            return
+        }
+
+        let streamId = UInt32.random(in: 1...UInt32.max)
+        udpStreamId = streamId
+        udpVideoSender = UdpVideoSender(host: host, port: port, queue: queue)
+        sendJSONFrame([
+            "type": WireMessage.transportOffer,
+            "video": ["udp", "tcp"],
+            "control": "tcp",
+            "udpPort": Int(rawPort),
+            "streamId": Int(streamId),
+            "fecPct": 20,
+        ])
+    }
+
+    private func udpPreferenceAllowsNegotiation() -> Bool {
+        let preference = UserDefaults.standard.string(forKey: "videoTransport") ?? "auto"
+        return preference == "udp"
+            || (preference == "auto" && UserDefaults.standard.bool(forKey: "udpAutoEnabled"))
+    }
+
+    private func udpPeerHost() -> NWEndpoint.Host? {
+        guard case .hostPort(let host, _) = connection?.currentPath?.remoteEndpoint else {
+            return nil
+        }
+        let withoutZone = host.debugDescription.split(separator: "%", maxSplits: 1)
+            .first
+            .map(String.init) ?? host.debugDescription
+        return NWEndpoint.Host(withoutZone)
+    }
+
+    private static func isLoopbackHost(_ host: NWEndpoint.Host) -> Bool {
+        let value = host.debugDescription.lowercased()
+        return value == "localhost" || value == "::1" || value.hasPrefix("127.")
+    }
+
     /// Ask the receiver to update from the App Store (built via JSONSerialization
     /// because the message text is user-facing prose).
     private func sendUpdateRequired(kind: String) {
@@ -1695,6 +1769,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         var frame = Data(bytes: &header, count: 4)
         frame.append(payload)
         connection.send(content: frame, completion: .contentProcessed { _ in })
+    }
+
+    private func sendJSONFrame(_ object: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: object),
+              let json = String(data: data, encoding: .utf8) else {
+            return
+        }
+        sendJSONFrame(json)
     }
 
     private func sendFramed(_ payload: Data) {

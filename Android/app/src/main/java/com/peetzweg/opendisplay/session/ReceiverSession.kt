@@ -1,9 +1,11 @@
 package com.peetzweg.opendisplay.session
 
 import android.content.Context
+import com.peetzweg.opendisplay.net.UdpVideoReceiver
 import com.peetzweg.opendisplay.wire.FrameCodec
 import com.peetzweg.opendisplay.wire.WireMessage
 import com.peetzweg.opendisplay.wire.WireProtocol
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.io.OutputStream
@@ -45,6 +47,9 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     var scale: Double = 1.0
     var device: String = "Android"
     var installId: String = ""
+    var udpVideoEnabled: Boolean = true
+
+    internal var testHookSendControl: ((Map<String, Any>) -> Unit)? = null
 
     @Volatile private var running = false
     /** True while the accept loop has an open ServerSocket. Mirrors iOS `listenerHealthy`. */
@@ -63,6 +68,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     }
     private var pingFuture: ScheduledFuture<*>? = null
     private var watchdogFuture: ScheduledFuture<*>? = null
+    private var udpVideoReceiver: UdpVideoReceiver? = null
 
     // --- Liveness / clock sync (iOS PhoneReceiver) ---
     private val lastDataReceivedMs = AtomicLong(0L)
@@ -107,6 +113,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         running = false
         listenerHealthy = false
         stopLivenessTimers()
+        stopUdpVideo()
         try {
             serverSocket?.close()
         } catch (_: IOException) {
@@ -143,8 +150,28 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
 
     /** Send control JSON; auto-stamps touch with Mac-clock `t` when synced. */
     fun sendControl(map: Map<String, Any>) {
+        testHookSendControl?.let {
+            it(map)
+            return
+        }
         val stamped = SessionTelemetry.stampTouch(map, nowMs(), clockOffsetMs)
         sendFrame(JSONObject(stamped).toString().toByteArray(Charsets.UTF_8))
+    }
+
+    fun startUdpVideo(port: Int, streamId: Int) {
+        stopUdpVideo()
+        udpVideoReceiver = UdpVideoReceiver(port).also { receiver ->
+            receiver.start {
+                // Datagram assembly and decode delivery land in Tasks 4–5.
+                @Suppress("UNUSED_VARIABLE")
+                val negotiatedStreamId = streamId
+            }
+        }
+    }
+
+    fun stopUdpVideo() {
+        udpVideoReceiver?.stop()
+        udpVideoReceiver = null
     }
 
     /**
@@ -275,6 +302,10 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
             return
         }
         val map = parseControl(payload) ?: return
+        dispatchControl(map)
+    }
+
+    private fun dispatchControl(map: Map<String, Any>) {
         when (map["type"]) {
             "pong" -> handlePong(map)
             "ping" -> {
@@ -282,8 +313,45 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
                 sendControl(pongFor(map["t"]))
                 absorbMacPing(map)
             }
+            WireMessage.transportOffer -> onTransportOffer(map)
         }
         listener.onControl(map)
+    }
+
+    internal fun handleControlForTest(map: Map<String, Any>) = dispatchControl(map)
+
+    private fun onTransportOffer(map: Map<String, Any>) {
+        val video = when (val value = map["video"]) {
+            is Iterable<*> -> value.mapNotNull { it as? String }
+            is JSONArray -> (0 until value.length()).mapNotNull { value.optString(it, null) }
+            else -> emptyList()
+        }
+        val port = (map["udpPort"] as? Number)?.toInt()
+        val streamId = (map["streamId"] as? Number)?.toInt()
+        if (udpVideoEnabled && "udp" in video && port != null && streamId != null) {
+            try {
+                startUdpVideo(port, streamId)
+                sendControl(
+                    mapOf(
+                        "type" to WireMessage.transportSelected,
+                        "video" to "udp",
+                        "control" to "tcp",
+                        "streamId" to streamId,
+                    ),
+                )
+                return
+            } catch (error: IOException) {
+                listener.onStatus("udp-bind-error:${error.message}")
+            }
+        }
+        sendControl(
+            mapOf(
+                "type" to WireMessage.transportSelected,
+                "video" to "tcp",
+                "control" to "tcp",
+                "streamId" to (streamId ?: 0),
+            ),
+        )
     }
 
     private fun handlePong(map: Map<String, Any>) {
@@ -487,8 +555,19 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     }
 
     private fun sendHello() {
+        val offersUdp = udpVideoEnabled &&
+            clientSocket?.inetAddress?.isLoopbackAddress == false
         sendFrame(
-            helloJson(pixelsWide, pixelsHigh, scale, device, installId, WireProtocol.version)
+            helloJson(
+                pixelsWide,
+                pixelsHigh,
+                scale,
+                device,
+                installId,
+                WireProtocol.version,
+                videoTransports = if (offersUdp) listOf("tcp", "udp") else null,
+                udpPort = if (offersUdp) DEFAULT_UDP_PORT else null,
+            )
                 .toByteArray(Charsets.UTF_8),
         )
     }
@@ -516,6 +595,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
      */
     private fun closeClient(reason: String, notify: Boolean, announceBye: Boolean) {
         stopLivenessTimers()
+        stopUdpVideo()
         val had = clientSocket != null
         if (had) {
             logW("closeClient reason=$reason notify=$notify announceBye=$announceBye")
@@ -547,11 +627,21 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
 
     companion object {
         const val DEFAULT_PORT = 9000
+        const val DEFAULT_UDP_PORT = 9001
         private const val TAG = "ReceiverSession"
         private const val MAX_SAMPLES = 120
         private const val WATCHDOG_MS = 5_000L
 
-        fun helloJson(wide: Int, high: Int, scale: Double, device: String, id: String, pv: Int): String {
+        fun helloJson(
+            wide: Int,
+            high: Int,
+            scale: Double,
+            device: String,
+            id: String,
+            pv: Int,
+            videoTransports: List<String>? = null,
+            udpPort: Int? = null,
+        ): String {
             val obj = JSONObject()
             obj.put("type", "hello")
             obj.put("pixelsWide", wide)
@@ -560,6 +650,8 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
             obj.put("device", device)
             obj.put("id", id)
             obj.put("pv", pv)
+            if (videoTransports != null) obj.put("video", JSONArray(videoTransports))
+            if (udpPort != null) obj.put("udpPort", udpPort)
             return obj.toString()
         }
 
