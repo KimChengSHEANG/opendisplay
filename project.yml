@@ -63,8 +63,8 @@ targets:
         # (used to sign the appcast in CI) and is never committed. Sparkle
         # verifies update signatures against this public key before installing.
         SUPublicEDKey: rYxlIePmwzi2bRo/qIsuY2TqTnQ34li2gQhJpGBiumw=
-        # Check for updates automatically in the background on a schedule.
-        SUEnableAutomaticChecks: true
+        # Manual "Check for Updates…" only — no scheduled background checks.
+        SUEnableAutomaticChecks: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.peetzweg.opensidecar.mac
