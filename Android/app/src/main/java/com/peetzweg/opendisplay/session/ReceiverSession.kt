@@ -344,21 +344,27 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         synchronized(udpStateLock) {
             fallbackTracker.noteWindow(snapshot.lossPct)
             if (fallbackTracker.preferredVideoTransport() == "tcp") {
-                preferTcpVideo = true
-                fallbackTracker.reset()
-                val streamId = udpVideoStreamId ?: 0
-                stopUdpVideo()
-                sendControl(
-                    mapOf(
-                        "type" to WireMessage.transportSelected,
-                        "video" to "tcp",
-                        "control" to "tcp",
-                        "streamId" to streamId,
-                    ),
-                )
+                fallbackToTcpVideo(udpVideoStreamId ?: 0)
             }
         }
     }
+
+    private fun fallbackToTcpVideo(streamId: Int) {
+        preferTcpVideo = true
+        fallbackTracker.reset()
+        stopUdpVideo()
+        sendControl(mapOf("type" to "kf"))
+        sendControl(
+            mapOf(
+                "type" to WireMessage.transportSelected,
+                "video" to "tcp",
+                "control" to "tcp",
+                "streamId" to streamId,
+            ),
+        )
+    }
+
+    internal fun fallbackToTcpVideoForTest(streamId: Int) = fallbackToTcpVideo(streamId)
 
     private data class QosWindowCounters(
         val lateFrames: Int,

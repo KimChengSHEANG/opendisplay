@@ -144,6 +144,21 @@ class ReceiverSessionTest {
     }
 
     @Test
+    fun udp_fallback_sends_keyframe_before_transport_selected() {
+        val sent = mutableListOf<Map<String, Any>>()
+        val session = ReceiverSession(listener = noopListener)
+        session.testHookSendControl = { sent += it }
+
+        session.fallbackToTcpVideoForTest(42)
+
+        assertEquals(listOf("kf", com.peetzweg.opendisplay.wire.WireMessage.transportSelected), sent.map { it["type"] })
+        val tcp = sent.last()
+        assertEquals("tcp", tcp["video"])
+        assertEquals(42, tcp["streamId"])
+        assertTrue(session.preferTcpVideoForTest)
+    }
+
+    @Test
     fun updatePanel_updatesFieldsForNextHelloWithNoLiveConnection() {
         val session = ReceiverSession(listener = noopListener)
         session.pixelsWide = 1080

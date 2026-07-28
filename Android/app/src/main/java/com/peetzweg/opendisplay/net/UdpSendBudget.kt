@@ -4,6 +4,9 @@ object UdpSendBudget {
     fun shouldNetDrop(pendingDatagrams: Int, maxPending: Int): Boolean =
         pendingDatagrams >= maxPending
 
+    fun wouldRejectFrame(pendingDatagrams: Int, frameDatagrams: Int, maxPending: Int): Boolean =
+        pendingDatagrams + frameDatagrams > maxPending
+
     fun paceDelayMs(batchBytes: Int, bytesPerMs: Int): Double {
         val budget = maxOf(1, bytesPerMs)
         return (batchBytes.toDouble() / budget.toDouble()).coerceIn(0.05, 8.0)

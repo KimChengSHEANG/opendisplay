@@ -116,7 +116,6 @@ final class UdpVideoSender {
 
     private func sendFrameOnQueue(au: Data, keyframe: Bool, captureMs: UInt64) -> Bool {
         guard ready, let connection else { return false }
-        if pendingDatagrams >= maxPendingDatagrams { return false }
         let sendMs = UInt64(Date().timeIntervalSince1970 * 1000)
         let packaged = UdpVideoPackager.packageFrame(
             au: au,
@@ -127,27 +126,29 @@ final class UdpVideoSender {
             captureMs: captureMs,
             sendMs: sendMs
         )
+        let datagramCount = packaged.packets.count
+        if pendingDatagrams + datagramCount > maxPendingDatagrams { return false }
         nextFrameId &+= 1
         nextSeq = packaged.nextSeq
         for pkt in packaged.packets {
             cacheOnQueue(seq: pkt.seq, datagram: pkt.datagram)
         }
-        paceAndSendOnQueue(packaged.packets, on: connection)
+        pendingDatagrams += datagramCount
+        paceDatagramsOnQueue(packaged.packets.map(\.datagram), on: connection, alreadyReserved: true)
         return true
     }
 
     private func handleNackOnQueue(missing: [UInt16]) {
         guard let connection, ready else { return }
+        var datagrams: [Data] = []
         for seq in missing {
             guard let dgram = retransmitCache[seq] else { continue }
-            pendingDatagrams += 1
-            connection.send(content: dgram, completion: .contentProcessed { [weak self] _ in
-                guard let self else { return }
-                self.queue.async {
-                    self.pendingDatagrams = max(0, self.pendingDatagrams - 1)
-                }
-            })
+            datagrams.append(dgram)
         }
+        guard !datagrams.isEmpty else { return }
+        if pendingDatagrams + datagrams.count > maxPendingDatagrams { return }
+        pendingDatagrams += datagrams.count
+        paceDatagramsOnQueue(datagrams, on: connection, alreadyReserved: true)
     }
 
     private func bytesPerMs() -> Int {
@@ -171,16 +172,22 @@ final class UdpVideoSender {
         }
     }
 
-    private func paceAndSendOnQueue(_ packets: [UdpVideoPackager.Packet], on connection: NWConnection) {
+    private func paceDatagramsOnQueue(
+        _ datagrams: [Data],
+        on connection: NWConnection,
+        alreadyReserved: Bool
+    ) {
         var index = 0
         func sendNextBatch() {
-            guard index < packets.count else { return }
-            let end = min(index + batchSize, packets.count)
+            guard index < datagrams.count else { return }
+            let end = min(index + batchSize, datagrams.count)
             var batchBytes = 0
             for i in index..<end {
-                let dgram = packets[i].datagram
+                let dgram = datagrams[i]
                 batchBytes += dgram.count
-                pendingDatagrams += 1
+                if !alreadyReserved {
+                    pendingDatagrams += 1
+                }
                 connection.send(content: dgram, completion: .contentProcessed { [weak self] _ in
                     guard let self else { return }
                     self.queue.async {
@@ -189,7 +196,7 @@ final class UdpVideoSender {
                 })
             }
             index = end
-            guard index < packets.count else { return }
+            guard index < datagrams.count else { return }
             let delayMs = paceDelayMs(batchBytes: batchBytes)
             let ns = UInt64(delayMs * 1_000_000)
             queue.asyncAfter(deadline: .now() + .nanoseconds(Int(ns))) {

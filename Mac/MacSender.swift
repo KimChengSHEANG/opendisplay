@@ -1347,7 +1347,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 udpVideoSender?.stop()
                 udpVideoSender = nil
                 udpStreamId = nil
-                Log.info("TCP video selected")
+                needsKeyframe = true
+                if let pixelBuffer = lastPixelBuffer {
+                    Log.info("TCP video selected — forcing keyframe after UDP fallback")
+                    encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
+                } else {
+                    Log.info("TCP video selected")
+                }
             }
         case WireMessage.qos:
             guard videoViaUdp else { break }
