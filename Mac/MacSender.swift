@@ -219,6 +219,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var videoViaUdp = false
     /// Peer selected UDP; keep TCP video until the UDP socket is ready.
     private var udpSelectedAwaitingReady = false
+    /// Mid-session UDP→TCP fallback (qos / peer). Cleared on the next dial so
+    /// opt-in UDP can try again — must not rewrite UserDefaults `videoTransport`
+    /// (that left the picker on "UDP" while every reconnect stayed TCP/WiFi).
+    private var preferTcpVideoThisSession = false
     private var videoRateController: VideoRateController?
     private let maxPendingUdpDatagrams = 256
     /// Conservative WiFi start; AIMD climbs via qos (avoids the ~93% loss cliff).
@@ -719,6 +723,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         udpStreamId = nil
         videoViaUdp = false
         udpSelectedAwaitingReady = false
+        preferTcpVideoThisSession = false
         videoRateController = nil
 
         queue.async { [weak self] in
@@ -772,6 +777,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.udpStreamId = nil
             self.videoViaUdp = false
             self.udpSelectedAwaitingReady = false
+            self.preferTcpVideoThisSession = false
             self.videoRateController = nil
             self.pendingSends = 0
             self.pipelineLock.lock()
@@ -917,6 +923,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // flag here let the 10s grace kill Chromebook reconnects.
         consecutiveRefusals = 0
         disconnectedSince = nil
+        preferTcpVideoThisSession = false
         needsKeyframe = true   // new peer needs SPS/PPS + IDR
         // A reconnect can recreate the phone's video view with no cursor
         // sprite; the sprite is otherwise only sent on shape change, so the
@@ -1359,6 +1366,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if selected == "udp", selectedStreamId == udpStreamId {
                 beginUdpVideoSelected(streamId: selectedStreamId ?? 0)
             } else {
+                preferTcpVideoThisSession = true
                 fallbackToTcpVideo(reason: "peer selected TCP")
             }
         case WireMessage.qos:
@@ -1380,7 +1388,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             }
             if action.preferTcpNextSession {
-                UserDefaults.standard.set("tcp", forKey: "videoTransport")
+                // Session-local only — never stomp the user's UDP/Auto picker.
+                preferTcpVideoThisSession = true
                 Log.info("QoS: falling back to TCP mid-session (loss=\(lossPct)%)")
                 fallbackToTcpVideo(reason: "qos loss")
             }
@@ -1791,11 +1800,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         videoViaUdp = false
         udpSelectedAwaitingReady = false
 
-        guard info.kind == "Android" || info.kind == "Chromebook",
+        guard !preferTcpVideoThisSession,
+              info.kind == "Android" || info.kind == "Chromebook",
               info.video?.contains("udp") == true,
               let rawPort = info.udpPort,
               let port = NWEndpoint.Port(rawValue: rawPort),
-              udpPreferenceAllowsNegotiation(),
+              Self.udpPreferenceAllowsNegotiation(
+                preference: UserDefaults.standard.string(forKey: "videoTransport") ?? "auto",
+                udpAutoEnabled: UserDefaults.standard.bool(forKey: "udpAutoEnabled")
+              ),
               let host = udpPeerHost(),
               !Self.isLoopbackHost(host) else {
             return
@@ -1880,10 +1893,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    private func udpPreferenceAllowsNegotiation() -> Bool {
-        let preference = UserDefaults.standard.string(forKey: "videoTransport") ?? "auto"
-        return preference == "udp"
-            || (preference == "auto" && UserDefaults.standard.bool(forKey: "udpAutoEnabled"))
+    /// Whether the Mac Settings preference allows offering UDP (ignores
+    /// mid-session fallback — that is `preferTcpVideoThisSession`).
+    static func udpPreferenceAllowsNegotiation(preference: String, udpAutoEnabled: Bool) -> Bool {
+        preference == "udp" || (preference == "auto" && udpAutoEnabled)
     }
 
     private func udpPeerHost() -> NWEndpoint.Host? {
