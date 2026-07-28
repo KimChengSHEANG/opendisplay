@@ -217,8 +217,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var udpVideoSender: UdpVideoSender?
     private var udpStreamId: UInt32?
     private var videoViaUdp = false
+    /// Peer selected UDP; keep TCP video until the UDP socket is ready.
+    private var udpSelectedAwaitingReady = false
     private var videoRateController: VideoRateController?
-    private let maxPendingUdpDatagrams = 64
+    private let maxPendingUdpDatagrams = 256
+    /// Conservative WiFi start; AIMD climbs via qos (avoids the ~93% loss cliff).
+    private static let udpStartBitrate = VideoRateController.udpInitialBitrate
     private var virtualDisplay: VirtualDisplay?
     private let queue = DispatchQueue(label: "sender.video")
     private let startCode: [UInt8] = [0, 0, 0, 1]
@@ -524,15 +528,27 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             panelWide: info.pixelsWide, panelHigh: info.pixelsHigh,
             quality: quality, frameRate: frameRatePreset, deviceKind: info.device
         )
-        encodeBitrate = plan.bitrate
+        // UDP negotiates before capture exists; keep the conservative WiFi
+        // start bitrate instead of slamming 36Mbps IDRs onto a cold path.
+        if videoViaUdp || udpSelectedAwaitingReady {
+            encodeBitrate = min(plan.bitrate, Self.udpStartBitrate)
+            udpVideoSender?.updateBitrate(encodeBitrate)
+        } else {
+            encodeBitrate = plan.bitrate
+        }
         encodeFrameRate = plan.fps
-        Log.info("capture plan: \(plan.width)x\(plan.height)@\(plan.fps) \(plan.bitrate/1_000_000)Mbps quality=\(quality.rawValue) resolution=\(displayResolution.rawValue) kind=\(info.device ?? "?")")
+        Log.info("capture plan: \(plan.width)x\(plan.height)@\(plan.fps) \(encodeBitrate/1_000_000)Mbps quality=\(quality.rawValue) resolution=\(displayResolution.rawValue) kind=\(info.device ?? "?")")
         try await startCapture(
             display: display,
             pixelsWide: plan.width,
             pixelsHigh: plan.height,
             frameRate: plan.fps,
         )
+        // UDP often selected before the encoder/pixel buffer existed.
+        if videoViaUdp || udpSelectedAwaitingReady {
+            applyKeyframeInterval(forUdp: true)
+            needsKeyframe = true
+        }
 
         // Debug aid (`defaults write sh.peet.opensidecar.mac testPattern -bool true`):
         // an animated window on the virtual display generates a constant frame
@@ -702,6 +718,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         udpVideoSender = nil
         udpStreamId = nil
         videoViaUdp = false
+        udpSelectedAwaitingReady = false
+        videoRateController = nil
 
         queue.async { [weak self] in
             guard let self else { return }
@@ -753,6 +771,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.udpVideoSender = nil
             self.udpStreamId = nil
             self.videoViaUdp = false
+            self.udpSelectedAwaitingReady = false
+            self.videoRateController = nil
             self.pendingSends = 0
             self.pipelineLock.lock()
             self.pendingEncodes = 0
@@ -1045,6 +1065,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         udpVideoSender = nil
         udpStreamId = nil
         videoViaUdp = false
+        udpSelectedAwaitingReady = false
+        videoRateController = nil
         pendingSends = 0
         pipelineLock.lock()
         pendingEncodes = 0
@@ -1335,36 +1357,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let selected = obj["video"] as? String
             let selectedStreamId = (obj["streamId"] as? NSNumber)?.uint32Value
             if selected == "udp", selectedStreamId == udpStreamId {
-                videoViaUdp = true
-                videoRateController = VideoRateController(initialBitrate: encodeBitrate)
-                applyKeyframeInterval(forUdp: true)
-                udpVideoSender?.updateBitrate(encodeBitrate)
-                // Fresh UDP path — decoder is awaitingSync; force IDR now so
-                // Chromebook VDA is not stuck black waiting for a periodic GOP.
-                needsKeyframe = true
-                if let pixelBuffer = lastPixelBuffer {
-                    Log.info("UDP video selected (stream \(selectedStreamId ?? 0)) — forcing keyframe")
-                    encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
-                } else {
-                    Log.info("UDP video selected (stream \(selectedStreamId ?? 0)); TCP remains control")
-                }
+                beginUdpVideoSelected(streamId: selectedStreamId ?? 0)
             } else {
-                videoViaUdp = false
-                videoRateController = nil
-                applyKeyframeInterval(forUdp: false)
-                udpVideoSender?.stop()
-                udpVideoSender = nil
-                udpStreamId = nil
-                needsKeyframe = true
-                if let pixelBuffer = lastPixelBuffer {
-                    Log.info("TCP video selected — forcing keyframe after UDP fallback")
-                    encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
-                } else {
-                    Log.info("TCP video selected")
-                }
+                fallbackToTcpVideo(reason: "peer selected TCP")
             }
         case WireMessage.qos:
-            guard videoViaUdp else { break }
+            guard videoViaUdp || udpSelectedAwaitingReady else { break }
             let lossPct = (obj["lossPct"] as? NSNumber)?.doubleValue ?? 0
             let jitterMs = (obj["jitterMs"] as? NSNumber)?.doubleValue ?? 0
             let nackRate = (obj["nackRate"] as? NSNumber)?.doubleValue ?? 0
@@ -1381,7 +1379,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             if action.preferTcpNextSession {
                 UserDefaults.standard.set("tcp", forKey: "videoTransport")
-                Log.info("QoS: prefer TCP on next session (loss=\(lossPct)%)")
+                Log.info("QoS: falling back to TCP mid-session (loss=\(lossPct)%)")
+                fallbackToTcpVideo(reason: "qos loss")
             }
         case WireMessage.nack:
             let nackStreamId = (obj["streamId"] as? NSNumber)?.uint32Value
@@ -1699,14 +1698,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.pendingEncodes = max(0, self.pendingEncodes - 1)
             self.pipelineLock.unlock()
             if status == noErr, let buffer, let data = self.annexB(from: buffer) {
-                let sndMs = Int64(Date().timeIntervalSince1970 * 1000)
-                var framed = Data("{\"cap\":\(capturedAtMs),\"snd\":\(sndMs)}".utf8)
-                framed.append(data)
-                self.sendFramed(
-                    framed,
-                    keyframe: self.isKeyframe(buffer),
-                    captureMs: UInt64(capturedAtMs)
-                )
+                let keyframe = self.isKeyframe(buffer)
+                let capture = UInt64(capturedAtMs)
+                if self.videoViaUdp {
+                    // UDP header already carries capture/send timestamps.
+                    self.sendFramed(data, keyframe: keyframe, captureMs: capture)
+                } else {
+                    let sndMs = Int64(Date().timeIntervalSince1970 * 1000)
+                    var framed = Data("{\"cap\":\(capturedAtMs),\"snd\":\(sndMs)}".utf8)
+                    framed.append(data)
+                    self.sendFramed(framed, keyframe: keyframe, captureMs: capture)
+                }
             }
             // Encode the newest held capture immediately — do not wait for SCK.
             self.queue.async { self.encodeHeldIfReady() }
@@ -1796,6 +1798,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         udpVideoSender = nil
         udpStreamId = nil
         videoViaUdp = false
+        udpSelectedAwaitingReady = false
 
         guard info.kind == "Android" || info.kind == "Chromebook",
               info.video?.contains("udp") == true,
@@ -1810,14 +1813,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let streamId = UInt32.random(in: 1...UInt32.max)
         udpStreamId = streamId
         let sender = UdpVideoSender(queue: queue)
-        sender.updateBitrate(encodeBitrate)
+        sender.updateBitrate(Self.udpStartBitrate)
+        sender.onReady = { [weak self] in
+            guard let self else { return }
+            self.queue.async {
+                guard self.udpSelectedAwaitingReady else { return }
+                self.activateUdpVideo(streamId: self.udpStreamId ?? streamId)
+            }
+        }
         sender.onFailed = { [weak self] msg in
             guard let self else { return }
-            Log.info("UDP video failed (\(msg)) — staying on TCP")
-            self.videoViaUdp = false
-            self.udpVideoSender?.stop()
-            self.udpVideoSender = nil
-            self.udpStreamId = nil
+            self.queue.async {
+                Log.info("UDP video failed (\(msg)) — staying on TCP")
+                self.fallbackToTcpVideo(reason: "udp socket failed")
+            }
         }
         udpVideoSender = sender
         sender.connect(host: host, port: port)
@@ -1829,6 +1838,55 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             "streamId": Int(streamId),
             "fecPct": 20,
         ])
+    }
+
+    /// Peer selected UDP — stay on TCP video until the UDP socket is ready so
+    /// the forced IDR is not dropped into a not-yet-ready sender.
+    private func beginUdpVideoSelected(streamId: UInt32) {
+        udpSelectedAwaitingReady = true
+        applyEncodeBitrate(Self.udpStartBitrate)
+        videoRateController = VideoRateController(initialBitrate: Self.udpStartBitrate)
+        applyKeyframeInterval(forUdp: true)
+        udpVideoSender?.updateBitrate(encodeBitrate)
+        if udpVideoSender?.isReady == true {
+            activateUdpVideo(streamId: streamId)
+        } else {
+            Log.info("UDP video selected (stream \(streamId)) — waiting for socket; TCP video continues")
+        }
+    }
+
+    private func activateUdpVideo(streamId: UInt32) {
+        guard udpSelectedAwaitingReady else { return }
+        guard udpVideoSender?.isReady == true else { return }
+        udpSelectedAwaitingReady = false
+        videoViaUdp = true
+        // Fresh UDP path — decoder is awaitingSync; force IDR now so
+        // Chromebook VDA is not stuck black waiting for a periodic GOP.
+        needsKeyframe = true
+        if let pixelBuffer = lastPixelBuffer {
+            Log.info("UDP video ready (stream \(streamId)) — forcing keyframe")
+            encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
+        } else {
+            Log.info("UDP video ready (stream \(streamId)); awaiting next capture for IDR")
+        }
+    }
+
+    private func fallbackToTcpVideo(reason: String) {
+        let wasUdp = videoViaUdp || udpSelectedAwaitingReady
+        videoViaUdp = false
+        udpSelectedAwaitingReady = false
+        videoRateController = nil
+        applyKeyframeInterval(forUdp: false)
+        udpVideoSender?.stop()
+        udpVideoSender = nil
+        udpStreamId = nil
+        needsKeyframe = true
+        if let pixelBuffer = lastPixelBuffer {
+            Log.info("TCP video (\(reason)) — forcing keyframe\(wasUdp ? " after UDP" : "")")
+            encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
+        } else {
+            Log.info("TCP video (\(reason))")
+        }
     }
 
     private func udpPreferenceAllowsNegotiation() -> Bool {

@@ -68,7 +68,7 @@ enum VideoTransportPreference: String, CaseIterable, Identifiable {
         case .tcp:
             return "Always framed TCP video — safest default for USB and mixed peers."
         case .udp:
-            return "Negotiate UDP video with FEC/NACK on Android/Chromebook WiFi; falls back to TCP on sustained loss."
+            return "Negotiate UDP video with FEC/NACK on Android/Chromebook WiFi; falls back to TCP mid-session on sustained loss."
         }
     }
 }
@@ -649,6 +649,40 @@ final class SenderController: ObservableObject {
         return false
     }
 
+    /// Collapse `adb connect 192.168.x.x` and `adb connect Android.local` (and
+    /// cable serials) that are the same Chromebook into one list-row key.
+    private func androidMergeKey(for device: AdbDevice) -> String {
+        if let id = installIDByAdbSerial[device.serial] {
+            return "install:\(id)"
+        }
+        if let wifiName = knownReceiverKinds["adb:\(device.serial):wifiName"] {
+            return "wifi:\(wifiName)"
+        }
+        if device.isChromebook, let model = device.model, !model.isEmpty {
+            return "chromebook-model:\(model.lowercased())"
+        }
+        return "serial:\(device.serial)"
+    }
+
+    /// One representative per physical Android/Chromebook — prefers a live
+    /// session's serial, then USB cable, then a stable sorted network serial.
+    private func preferredAndroidDevices() -> [AdbDevice] {
+        var groups: [String: [AdbDevice]] = [:]
+        for device in androidDevices {
+            groups[androidMergeKey(for: device), default: []].append(device)
+        }
+        return groups.keys.sorted().compactMap { key in
+            guard let group = groups[key], !group.isEmpty else { return nil }
+            if let live = group.first(where: { activeSession(coveringAndroid: $0.serial) != nil }) {
+                return live
+            }
+            if let cable = group.first(where: { !$0.isNetwork }) {
+                return cable
+            }
+            return group.sorted { $0.serial < $1.serial }.first
+        }
+    }
+
     /// An attached physical USB / ADB-cable device is (about to be) dialed —
     /// its WiFi service must not be grabbed in the launch race. Network ADB
     /// (`adb connect host:port`) is NOT a cable: treating it as one blocked
@@ -752,7 +786,7 @@ final class SenderController: ObservableObject {
         // auto-connect. Chromebooks often stream over `adb connect` (no real
         // USB gadget) — auto-dial those too when Bonjour isn't covering them
         // (wifiDisabled or not advertising yet).
-        for device in androidDevices where device.authorized {
+        for device in preferredAndroidDevices() where device.authorized {
             if device.isNetwork && !device.isChromebook { continue }
             let mode = connectionMode(forAndroid: device.serial)
             guard mode.allowsUSB else { continue }
@@ -769,6 +803,11 @@ final class SenderController: ObservableObject {
                    let name = serviceName(of: result),
                    !wifiDisabled.contains(ConnectionTarget.wifi(result).sessionID),
                    !wifiDisabled.contains("wifi:\(name)") {
+                    continue
+                }
+                // Another ADB alias (IP vs .local) may already own this device.
+                if let id = installIDByAdbSerial[device.serial],
+                   sessions.contains(where: { $0.deviceID == id }) {
                     continue
                 }
                 Log.info("auto-connect ADB \(target.sessionID)\(device.isNetwork ? " (network)" : "")")
@@ -976,7 +1015,8 @@ final class SenderController: ObservableObject {
     /// Safety net, not a feature: if identity was learned too late (old
     /// receiver, renamed service) and one physical device ended up with two
     /// sessions, the transports steal the receiver's single connection from
-    /// each other forever. Keep the cable, drop the WiFi twin.
+    /// each other forever. Keep the cable, drop the WiFi twin. Also collapse
+    /// ADB IP vs `.local` aliases that share one install id.
     private func dedupeSessions() {
         let usbSessionIDs = Set(sessions.compactMap { s -> String? in
             if case .usb = s.target { return s.deviceID }
@@ -1004,6 +1044,17 @@ final class SenderController: ObservableObject {
             if duplicate {
                 Log.info("two sessions for one device — keeping the cable, dropping \(s.id)")
                 end(s)
+            }
+        }
+        // Drop extra ADB-forward sessions for the same install id (IP + .local).
+        var seenAndroidInstallIDs = Set<String>()
+        for s in sessions {
+            guard case .androidUsb = s.target, let id = s.deviceID else { continue }
+            if seenAndroidInstallIDs.contains(id) {
+                Log.info("two ADB sessions for one device — dropping \(s.id)")
+                end(s)
+            } else {
+                seenAndroidInstallIDs.insert(id)
             }
         }
     }
@@ -1687,7 +1738,7 @@ final class SenderController: ObservableObject {
             entries.append(DeviceEntry(id: target.sessionID, name: label(for: target),
                                        usbTarget: target, wifiTarget: nil))
         }
-        for device in androidDevices {
+        for device in preferredAndroidDevices() {
             let target = ConnectionTarget.androidUsb(serial: device.serial)
             coveredSessionIDs.insert(target.sessionID)
             // Fold the matching Bonjour service into this row (iOS USB+WiFi
@@ -1695,6 +1746,13 @@ final class SenderController: ObservableObject {
             let twin = discovered.first { sameAndroidDevice($0, serial: device.serial) }
             if let twin, let name = serviceName(of: twin) { mergedServices.insert(name) }
             if let twin { coveredSessionIDs.insert(ConnectionTarget.wifi(twin).sessionID) }
+            // Alias serials (IP vs .local) share one row — cover their sessions too.
+            for alias in androidDevices where androidMergeKey(for: alias) == androidMergeKey(for: device) {
+                coveredSessionIDs.insert(ConnectionTarget.androidUsb(serial: alias.serial).sessionID)
+                if let covering = activeSession(coveringAndroid: alias.serial) {
+                    coveredSessionIDs.insert(covering.id)
+                }
+            }
             if let covering = activeSession(coveringAndroid: device.serial) {
                 coveredSessionIDs.insert(covering.id)
             }
@@ -1705,8 +1763,10 @@ final class SenderController: ObservableObject {
                 ?? (device.authorized
                     ? device.label
                     : "\(device.label) — tap Allow on device")
+            // Stable id across IP/.local aliases so SwiftUI doesn't flicker.
+            let entryID = "android:\(androidMergeKey(for: device))"
             entries.append(DeviceEntry(
-                id: "android:\(device.serial)",
+                id: entryID,
                 name: displayName,
                 usbTarget: device.authorized ? target : nil,
                 wifiTarget: twin.map { .wifi($0) },

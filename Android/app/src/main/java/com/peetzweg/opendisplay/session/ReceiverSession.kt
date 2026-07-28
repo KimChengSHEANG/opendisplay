@@ -1,6 +1,7 @@
 package com.peetzweg.opendisplay.session
 
 import android.content.Context
+import com.peetzweg.opendisplay.net.UdpJitterTiming
 import com.peetzweg.opendisplay.net.UdpVideoReceiver
 import com.peetzweg.opendisplay.wire.FrameCodec
 import com.peetzweg.opendisplay.wire.WireMessage
@@ -193,7 +194,11 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
             qosFramesWindow = 0
             fallbackTracker.reset()
         }
-        udpVideoReceiver = UdpVideoReceiver(port).also { receiver ->
+        udpVideoReceiver = UdpVideoReceiver(
+            port = port,
+            targetDelayMs = UdpJitterTiming.TARGET_DELAY_MS,
+            maxDelayMs = UdpJitterTiming.maxDelayMs(lastRttMs),
+        ).also { receiver ->
             receiver.start(
                 object : UdpVideoReceiver.Callbacks {
                     override fun onVideoFrame(

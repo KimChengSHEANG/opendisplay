@@ -8,14 +8,73 @@ import org.junit.Test
 class UdpSendBudgetTest {
     @Test
     fun shouldDropFrame_whenPendingAtCap() {
-        assertTrue(UdpSendBudget.shouldNetDrop(pendingDatagrams = 64, maxPending = 64))
-        assertFalse(UdpSendBudget.shouldNetDrop(pendingDatagrams = 10, maxPending = 64))
+        assertTrue(UdpSendBudget.shouldNetDrop(pendingDatagrams = 256, maxPending = 256))
+        assertFalse(UdpSendBudget.shouldNetDrop(pendingDatagrams = 10, maxPending = 256))
     }
 
     @Test
-    fun rejects_frame_when_pending_plus_datagrams_exceeds_cap() {
-        assertTrue(UdpSendBudget.wouldRejectFrame(pendingDatagrams = 50, frameDatagrams = 15, maxPending = 64))
-        assertFalse(UdpSendBudget.wouldRejectFrame(pendingDatagrams = 50, frameDatagrams = 14, maxPending = 64))
+    fun admits_large_frame_when_queue_empty() {
+        // ~80 data + 16 parity shards — previously rejected by a hard 64 cap.
+        assertTrue(
+            UdpSendBudget.shouldAdmitFrame(
+                pendingDatagrams = 0,
+                frameDatagrams = 96,
+                maxPending = 256,
+                keyframe = true,
+            ),
+        )
+        assertFalse(
+            UdpSendBudget.wouldRejectFrame(
+                pendingDatagrams = 0,
+                frameDatagrams = 96,
+                maxPending = 256,
+                keyframe = true,
+            ),
+        )
+    }
+
+    @Test
+    fun rejects_non_key_when_pending_plus_datagrams_exceeds_cap() {
+        assertTrue(
+            UdpSendBudget.wouldRejectFrame(
+                pendingDatagrams = 250,
+                frameDatagrams = 15,
+                maxPending = 256,
+                keyframe = false,
+            ),
+        )
+        assertFalse(
+            UdpSendBudget.wouldRejectFrame(
+                pendingDatagrams = 240,
+                frameDatagrams = 14,
+                maxPending = 256,
+                keyframe = false,
+            ),
+        )
+    }
+
+    @Test
+    fun never_rejects_keyframe_for_budget_when_backlogged() {
+        assertTrue(
+            UdpSendBudget.shouldAdmitFrame(
+                pendingDatagrams = 200,
+                frameDatagrams = 100,
+                maxPending = 256,
+                keyframe = true,
+            ),
+        )
+    }
+
+    @Test
+    fun rejects_oversized_frame_beyond_rs_cap() {
+        assertFalse(
+            UdpSendBudget.shouldAdmitFrame(
+                pendingDatagrams = 0,
+                frameDatagrams = 256,
+                maxPending = 256,
+                keyframe = true,
+            ),
+        )
     }
 
     @Test

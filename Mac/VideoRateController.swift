@@ -7,8 +7,10 @@ struct RateAction {
 final class VideoRateController {
     private var bitrate: Int
 
+    static let udpInitialBitrate = 8_000_000
+
     init(initialBitrate: Int) {
-        self.bitrate = initialBitrate
+        self.bitrate = max(2_000_000, initialBitrate)
     }
 
     func next(lossPct: Double, jitterMs: Double, nackRate: Double) -> RateAction {

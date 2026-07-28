@@ -139,9 +139,9 @@ and qos-driven bitrate. Control JSON always stays on the TCP control socket.
 
 | Mac `videoTransport` | Behavior |
 |---|---|
-| `auto` (default) | TCP video until the keep-UDP gate passes on Chromebook WiFi |
+| `auto` (default) | TCP video until the keep-UDP gate passes on Chromebook WiFi (`udpAutoEnabled` stays false until then) |
 | `tcp` | Always framed TCP video |
-| `udp` | Opt in to UDP; receiver falls back to TCP after sustained high loss |
+| `udp` | Opt in to UDP; falls back to TCP mid-session after sustained high loss |
 
 Set on the Mac via **Settings → WiFi video (Android)** or:
 

@@ -9,7 +9,11 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 
-class UdpVideoReceiver(port: Int) {
+class UdpVideoReceiver(
+    port: Int,
+    private val targetDelayMs: Long = UdpJitterTiming.TARGET_DELAY_MS,
+    private val maxDelayMs: Long = UdpJitterTiming.MAX_DELAY_MS,
+) {
     interface Callbacks {
         fun onVideoFrame(annexB: ByteArray, captureMs: Long, sendMs: Long, isKeyframe: Boolean)
         fun onIncomplete(frameId: Long, missingSeqs: IntArray, isKeyframe: Boolean)
@@ -114,8 +118,8 @@ class UdpVideoReceiver(port: Int) {
         if (running) return
         running = true
         jitter = JitterBuffer(
-            targetDelayMs = TARGET_DELAY_MS,
-            maxDelayMs = MAX_DELAY_MS,
+            targetDelayMs = targetDelayMs,
+            maxDelayMs = maxDelayMs,
             nowMs = { System.currentTimeMillis() },
             onRelease = { frame ->
                 callbacks.onVideoFrame(
@@ -237,8 +241,6 @@ class UdpVideoReceiver(port: Int) {
     private companion object {
         const val TAG = "UdpVideoReceiver"
         const val MAX_DATAGRAM_SIZE = 65_535
-        const val TARGET_DELAY_MS = 20L
-        const val MAX_DELAY_MS = 40L
         const val DRAIN_INTERVAL_MS = 5L
     }
 }

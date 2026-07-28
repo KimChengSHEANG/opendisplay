@@ -162,7 +162,8 @@ the floor once a force-capable build has spread.
   and qos-driven bitrate. Control JSON stays on TCP. Default `videoTransport`
   auto selects TCP until the Chromebook keep-UDP gate passes; opt in with
   `defaults write com.peetzweg.opensidecar.mac videoTransport udp` or the Mac app
-  Settings picker. USB and iOS remain TCP video.
+  Settings picker. Sustained high loss falls back to TCP video mid-session.
+  USB and iOS remain TCP video.
 
 **Breaking changes are two-phase (never one-shot):**
 
