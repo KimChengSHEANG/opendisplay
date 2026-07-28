@@ -25,42 +25,74 @@ class JitterBuffer(
         val firstSeenMs: Long,
     )
 
+    private val lock = Any()
     private val completeFrames = sortedMapOf<Long, Frame>()
     private val partialFrames = sortedMapOf<Long, PartialEntry>()
     private var playoutHeadCaptureMs = Long.MIN_VALUE
 
     fun offer(frame: Frame) {
-        if (!frame.complete) return
-        if (frame.captureMs + maxDelayMs < playoutHeadCaptureMs) {
-            onDropLate(frame.frameId)
-            return
+        val lateFrameId = synchronized(lock) {
+            if (!frame.complete) return
+            if (frame.captureMs + maxDelayMs < playoutHeadCaptureMs) {
+                return@synchronized frame.frameId
+            }
+            completeFrames[frame.frameId] = frame
+            null
         }
-        completeFrames[frame.frameId] = frame
+        if (lateFrameId != null) onDropLate(lateFrameId)
     }
 
     fun offerPartial(frameId: Long, missingSeqs: IntArray, firstSeenMs: Long) {
-        if (missingSeqs.isEmpty()) return
-        val existing = partialFrames[frameId]
-        partialFrames[frameId] = if (existing == null) {
-            PartialEntry(missingSeqs.copyOf(), firstSeenMs)
-        } else {
-            PartialEntry(
-                missingSeqs = mergeMissing(existing.missingSeqs, missingSeqs),
-                firstSeenMs = minOf(existing.firstSeenMs, firstSeenMs),
-            )
+        synchronized(lock) {
+            if (missingSeqs.isEmpty()) return
+            val existing = partialFrames[frameId]
+            partialFrames[frameId] = if (existing == null) {
+                PartialEntry(missingSeqs.copyOf(), firstSeenMs)
+            } else {
+                PartialEntry(
+                    missingSeqs = mergeMissing(existing.missingSeqs, missingSeqs),
+                    firstSeenMs = minOf(existing.firstSeenMs, firstSeenMs),
+                )
+            }
+            completeFrames.remove(frameId)
         }
-        completeFrames.remove(frameId)
     }
 
     fun drain() {
-        val now = nowMs()
-        dropLateCompleteFrames()
+        val actions = synchronized(lock) { collectDrainActions(nowMs()) }
+        for (action in actions) {
+            when (action) {
+                is DrainAction.Release -> {
+                    // Catch-up: release every consecutive complete frame at the playout head.
+                    onRelease(action.frame)
+                }
+                is DrainAction.DropLate -> onDropLate(action.frameId)
+                is DrainAction.Incomplete -> onIncomplete(action.frameId, action.missingSeqs)
+            }
+        }
+    }
+
+    internal fun advancePlayoutHeadForTest(captureMs: Long) {
+        synchronized(lock) {
+            playoutHeadCaptureMs = captureMs
+        }
+    }
+
+    private sealed class DrainAction {
+        data class Release(val frame: Frame) : DrainAction()
+        data class DropLate(val frameId: Long) : DrainAction()
+        data class Incomplete(val frameId: Long, val missingSeqs: IntArray) : DrainAction()
+    }
+
+    private fun collectDrainActions(now: Long): List<DrainAction> {
+        val actions = mutableListOf<DrainAction>()
+        dropLateCompleteFrames(actions)
         while (true) {
             val headId = nextHeadFrameId() ?: break
             val partial = partialFrames[headId]
             if (partial != null) {
                 if (now - partial.firstSeenMs >= maxDelayMs) {
-                    onIncomplete(headId, partial.missingSeqs)
+                    actions += DrainAction.Incomplete(headId, partial.missingSeqs.copyOf())
                     partialFrames.remove(headId)
                     continue
                 }
@@ -68,20 +100,17 @@ class JitterBuffer(
             }
             val head = completeFrames[headId] ?: break
             if (head.captureMs + targetDelayMs > now) break
-            releaseConsecutiveFrom(headId)
+            releaseConsecutiveFrom(headId, actions)
         }
+        return actions
     }
 
-    internal fun advancePlayoutHeadForTest(captureMs: Long) {
-        playoutHeadCaptureMs = captureMs
-    }
-
-    private fun dropLateCompleteFrames() {
+    private fun dropLateCompleteFrames(actions: MutableList<DrainAction>) {
         val iterator = completeFrames.entries.iterator()
         while (iterator.hasNext()) {
             val entry = iterator.next()
             if (entry.value.captureMs + maxDelayMs < playoutHeadCaptureMs) {
-                onDropLate(entry.key)
+                actions += DrainAction.DropLate(entry.key)
                 iterator.remove()
             }
         }
@@ -97,12 +126,12 @@ class JitterBuffer(
         }
     }
 
-    private fun releaseConsecutiveFrom(startId: Long) {
+    private fun releaseConsecutiveFrom(startId: Long, actions: MutableList<DrainAction>) {
         var id = startId
         while (true) {
             if (partialFrames.containsKey(id)) break
             val frame = completeFrames.remove(id) ?: break
-            onRelease(frame)
+            actions += DrainAction.Release(frame)
             playoutHeadCaptureMs = maxOf(playoutHeadCaptureMs, frame.captureMs)
             id++
         }

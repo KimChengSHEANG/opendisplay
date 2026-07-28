@@ -27,6 +27,7 @@ class UdpVideoReceiver(port: Int) {
     private var drainFuture: ScheduledFuture<*>? = null
     private val assembler = UdpFrameAssembler()
     private var jitter: JitterBuffer? = null
+    private val stateLock = Any()
     private val partialKeyframe = HashMap<Long, Boolean>()
 
     fun start(callbacks: Callbacks) {
@@ -46,20 +47,24 @@ class UdpVideoReceiver(port: Int) {
             },
             onDropLate = callbacks::onLateDrop,
             onIncomplete = { frameId, missingSeqs ->
-                val isKeyframe = partialKeyframe.remove(frameId) ?: false
+                val isKeyframe = synchronized(stateLock) {
+                    partialKeyframe.remove(frameId) ?: false
+                }
                 callbacks.onIncomplete(frameId, missingSeqs, isKeyframe)
             },
         )
         assembler.onIncompleteFrame = { incomplete ->
-            trackPartial(incomplete)
-            jitter?.offerPartial(
-                frameId = incomplete.frameId,
-                missingSeqs = incomplete.missingSeqs,
-                firstSeenMs = incomplete.firstSeenMs,
-            )
+            synchronized(stateLock) {
+                trackPartial(incomplete)
+                jitter?.offerPartial(
+                    frameId = incomplete.frameId,
+                    missingSeqs = incomplete.missingSeqs,
+                    firstSeenMs = incomplete.firstSeenMs,
+                )
+            }
         }
         drainFuture = scheduler.scheduleAtFixedRate(
-            { jitter?.drain() },
+            { synchronized(stateLock) { jitter?.drain() } },
             DRAIN_INTERVAL_MS,
             DRAIN_INTERVAL_MS,
             TimeUnit.MILLISECONDS,
@@ -93,9 +98,11 @@ class UdpVideoReceiver(port: Int) {
         socket.close()
         receiveThread?.interrupt()
         receiveThread = null
-        jitter = null
+        synchronized(stateLock) {
+            jitter = null
+            partialKeyframe.clear()
+        }
         assembler.onIncompleteFrame = null
-        partialKeyframe.clear()
     }
 
     private fun trackPartial(incomplete: UdpFrameAssembler.IncompleteFrame) {
@@ -105,28 +112,30 @@ class UdpVideoReceiver(port: Int) {
     private fun handleDatagram(datagram: ByteArray, callbacks: Callbacks) {
         val now = System.currentTimeMillis()
         val assembled = assembler.offer(datagram, nowMs = now)
-        if (assembled != null) {
-            partialKeyframe.remove(assembled.frameId)
-            jitter?.offer(
-                JitterBuffer.Frame(
-                    frameId = assembled.frameId,
-                    complete = true,
-                    captureMs = assembled.captureMs,
-                    sendMs = assembled.sendMs,
-                    annexB = assembled.annexB,
-                    isKeyframe = assembled.isKeyframe,
-                    seqs = assembled.seqs,
-                ),
-            )
-            return
-        }
-        assembler.currentIncomplete()?.let { incomplete ->
-            trackPartial(incomplete)
-            jitter?.offerPartial(
-                frameId = incomplete.frameId,
-                missingSeqs = incomplete.missingSeqs,
-                firstSeenMs = incomplete.firstSeenMs,
-            )
+        synchronized(stateLock) {
+            if (assembled != null) {
+                partialKeyframe.remove(assembled.frameId)
+                jitter?.offer(
+                    JitterBuffer.Frame(
+                        frameId = assembled.frameId,
+                        complete = true,
+                        captureMs = assembled.captureMs,
+                        sendMs = assembled.sendMs,
+                        annexB = assembled.annexB,
+                        isKeyframe = assembled.isKeyframe,
+                        seqs = assembled.seqs,
+                    ),
+                )
+                return
+            }
+            assembler.currentIncomplete()?.let { incomplete ->
+                trackPartial(incomplete)
+                jitter?.offerPartial(
+                    frameId = incomplete.frameId,
+                    missingSeqs = incomplete.missingSeqs,
+                    firstSeenMs = incomplete.firstSeenMs,
+                )
+            }
         }
     }
 
