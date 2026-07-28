@@ -217,6 +217,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var udpVideoSender: UdpVideoSender?
     private var udpStreamId: UInt32?
     private var videoViaUdp = false
+    private var videoRateController: VideoRateController?
     private let maxPendingUdpDatagrams = 64
     private var virtualDisplay: VirtualDisplay?
     private let queue = DispatchQueue(label: "sender.video")
@@ -1335,14 +1336,38 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let selectedStreamId = (obj["streamId"] as? NSNumber)?.uint32Value
             if selected == "udp", selectedStreamId == udpStreamId {
                 videoViaUdp = true
+                videoRateController = VideoRateController(initialBitrate: encodeBitrate)
+                applyKeyframeInterval(forUdp: true)
                 udpVideoSender?.updateBitrate(encodeBitrate)
                 Log.info("UDP video selected (stream \(selectedStreamId ?? 0)); TCP remains control")
             } else {
                 videoViaUdp = false
+                videoRateController = nil
+                applyKeyframeInterval(forUdp: false)
                 udpVideoSender?.stop()
                 udpVideoSender = nil
                 udpStreamId = nil
                 Log.info("TCP video selected")
+            }
+        case WireMessage.qos:
+            guard videoViaUdp else { break }
+            let lossPct = (obj["lossPct"] as? NSNumber)?.doubleValue ?? 0
+            let jitterMs = (obj["jitterMs"] as? NSNumber)?.doubleValue ?? 0
+            let nackRate = (obj["nackRate"] as? NSNumber)?.doubleValue ?? 0
+            guard let controller = videoRateController else { break }
+            let action = controller.next(lossPct: lossPct, jitterMs: jitterMs, nackRate: nackRate)
+            if let newBitrate = action.bitrate {
+                applyEncodeBitrate(newBitrate)
+            }
+            if action.forceKeyframe {
+                needsKeyframe = true
+                if let pixelBuffer = lastPixelBuffer {
+                    encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
+                }
+            }
+            if action.preferTcpNextSession {
+                UserDefaults.standard.set("tcp", forKey: "videoTransport")
+                Log.info("QoS: prefer TCP on next session (loss=\(lossPct)%)")
             }
         case WireMessage.nack:
             let nackStreamId = (obj["streamId"] as? NSNumber)?.uint32Value
@@ -1482,6 +1507,27 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: speedOverQuality)
         VTCompressionSessionPrepareToEncodeFrames(encoder)
         Log.info("encoder ready: \(width)x\(height) H.264 \(encodeBitrate / 1_000_000)Mbps@\(encodeFrameRate)fps quality=\(quality.rawValue) lowLatencyRC=\(lowLatency)")
+    }
+
+    private func applyKeyframeInterval(forUdp: Bool) {
+        guard let encoder else { return }
+        if forUdp {
+            VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 5 as CFNumber)
+            VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 300 as CFNumber)
+        } else {
+            VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 3600 as CFNumber)
+            VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 60 as CFNumber)
+        }
+    }
+
+    private func applyEncodeBitrate(_ bitrate: Int) {
+        encodeBitrate = bitrate
+        guard let encoder else { return }
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_AverageBitRate, value: encodeBitrate as CFNumber)
+        let peakBytes = Int64(Double(encodeBitrate) * 1.5 / 8.0)
+        let limits: [CFNumber] = [1 as CFNumber, peakBytes as CFNumber]
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
+        udpVideoSender?.updateBitrate(encodeBitrate)
     }
 
     // MARK: - Capture callback

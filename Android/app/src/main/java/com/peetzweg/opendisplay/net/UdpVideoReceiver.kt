@@ -15,6 +15,68 @@ class UdpVideoReceiver(port: Int) {
         fun onLateDrop(frameId: Long)
     }
 
+    data class QosSnapshot(
+        val lossPct: Double,
+        val jitterMs: Double,
+        val fecRecoveries: Int,
+    )
+
+    private class QosWindowStats {
+        private var lastSeq: Int? = null
+        private var datagramsReceived = 0
+        private var seqGaps = 0
+        private var fecRecoveries = 0
+        private var lastArrivalMs = 0L
+        private val interArrivalMs = ArrayList<Double>(32)
+
+        fun noteDatagram(seq: Int, nowMs: Long) {
+            datagramsReceived++
+            val previous = lastSeq
+            if (previous != null) {
+                val expected = (previous + 1) and 0xFFFF
+                if (seq != expected) {
+                    val forward = (seq - expected) and 0xFFFF
+                    if (forward in 1..0x7FFF) seqGaps += forward
+                }
+            }
+            lastSeq = seq
+            if (lastArrivalMs > 0L) {
+                interArrivalMs.add((nowMs - lastArrivalMs).toDouble())
+            }
+            lastArrivalMs = nowMs
+        }
+
+        fun noteFecRecovery() {
+            fecRecoveries++
+        }
+
+        fun snapshotAndReset(): QosSnapshot {
+            val total = datagramsReceived + seqGaps
+            val lossPct = if (total > 0) seqGaps * 100.0 / total else 0.0
+            val jitterMs = if (interArrivalMs.isEmpty()) {
+                0.0
+            } else {
+                val mean = interArrivalMs.sum() / interArrivalMs.size
+                interArrivalMs.sumOf { kotlin.math.abs(it - mean) } / interArrivalMs.size
+            }
+            val snapshot = QosSnapshot(lossPct = lossPct, jitterMs = jitterMs, fecRecoveries = fecRecoveries)
+            datagramsReceived = 0
+            seqGaps = 0
+            fecRecoveries = 0
+            interArrivalMs.clear()
+            return snapshot
+        }
+
+        fun reset() {
+            lastSeq = null
+            datagramsReceived = 0
+            seqGaps = 0
+            fecRecoveries = 0
+            lastArrivalMs = 0L
+            interArrivalMs.clear()
+        }
+    }
+
     private val socket = DatagramSocket(null).apply {
         reuseAddress = true
         bind(InetSocketAddress("0.0.0.0", port))
@@ -29,6 +91,7 @@ class UdpVideoReceiver(port: Int) {
     private var jitter: JitterBuffer? = null
     private val stateLock = Any()
     private val partialKeyframe = HashMap<Long, Boolean>()
+    private val qosStats = QosWindowStats()
 
     fun start(callbacks: Callbacks) {
         if (running) return
@@ -101,9 +164,12 @@ class UdpVideoReceiver(port: Int) {
         synchronized(stateLock) {
             jitter = null
             partialKeyframe.clear()
+            qosStats.reset()
         }
         assembler.onIncompleteFrame = null
     }
+
+    fun snapshotQosAndReset(): QosSnapshot = synchronized(stateLock) { qosStats.snapshotAndReset() }
 
     private fun trackPartial(incomplete: UdpFrameAssembler.IncompleteFrame) {
         partialKeyframe[incomplete.frameId] = incomplete.isKeyframe
@@ -111,9 +177,14 @@ class UdpVideoReceiver(port: Int) {
 
     private fun handleDatagram(datagram: ByteArray, callbacks: Callbacks) {
         val now = System.currentTimeMillis()
+        val header = UdpVideoProtocol.decodeHeader(datagram)
+        synchronized(stateLock) {
+            if (header != null) qosStats.noteDatagram(header.seq, now)
+        }
         val assembled = assembler.offer(datagram, nowMs = now)
         synchronized(stateLock) {
             if (assembled != null) {
+                if (assembled.recoveredByFec) qosStats.noteFecRecovery()
                 partialKeyframe.remove(assembled.frameId)
                 jitter?.offer(
                     JitterBuffer.Frame(

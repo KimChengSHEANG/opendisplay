@@ -240,6 +240,7 @@ class MainActivity : ComponentActivity() {
                     // it, then ask for another keyframe in case the stash was
                     // only P-frames or the ARC decoder needed a second sync.
                     d.renderingPaused = false
+                    d.onDecodeError = { session?.noteUdpDecodeError() }
                     decoder = d
                     val pending = pendingSyncFrame
                     pendingSyncFrame = null

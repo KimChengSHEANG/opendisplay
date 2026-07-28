@@ -51,6 +51,8 @@ class VideoDecoder(
             priority = Thread.MAX_PRIORITY
         }
     }
+    /** Called when VDA throws during decode — feeds UDP QoS keyframe policy. */
+    var onDecodeError: (() -> Unit)? = null
     /** Queued→rendered latency for the perf overlay (iOS `decodeP50`). */
     val timings = DecodeTimings()
 
@@ -244,6 +246,7 @@ class VideoDecoder(
             drainOutput(c, if (queue.isEmpty()) TAIL_TIMEOUT_US else 0)
         } catch (e: IllegalStateException) {
             Log.w(TAG, "decodeOne: ${e.message}")
+            onDecodeError?.invoke()
             // VDA often dies after a SurfaceView abandon — rebuild on next IDR.
             releaseCodec()
             keyframeRequested = true

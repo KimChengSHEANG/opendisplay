@@ -68,12 +68,20 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     }
     private var pingFuture: ScheduledFuture<*>? = null
     private var watchdogFuture: ScheduledFuture<*>? = null
+    private var qosFuture: ScheduledFuture<*>? = null
     private var udpVideoReceiver: UdpVideoReceiver? = null
     var udpVideoStreamId: Int? = null
         private set
     private val nackedUdpFrames = HashSet<Long>()
     @Volatile private var udpAwaitingKeyframe = true
+    @Volatile private var preferTcpVideo = false
     private val udpStateLock = Any()
+    private var qosLateFramesWindow = 0
+    private var qosIncompleteFramesWindow = 0
+    private var qosDecodeErrorsWindow = 0
+    private var qosNacksWindow = 0
+    private var qosFramesWindow = 0
+    private var consecutiveBadQosWindows = 0
 
     // --- Liveness / clock sync (iOS PhoneReceiver) ---
     private val lastDataReceivedMs = AtomicLong(0L)
@@ -169,6 +177,12 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         synchronized(udpStateLock) {
             nackedUdpFrames.clear()
             udpAwaitingKeyframe = true
+            qosLateFramesWindow = 0
+            qosIncompleteFramesWindow = 0
+            qosDecodeErrorsWindow = 0
+            qosNacksWindow = 0
+            qosFramesWindow = 0
+            consecutiveBadQosWindows = 0
         }
         udpVideoReceiver = UdpVideoReceiver(port).also { receiver ->
             receiver.start(
@@ -179,6 +193,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
                         sendMs: Long,
                         isKeyframe: Boolean,
                     ) {
+                        synchronized(udpStateLock) { qosFramesWindow++ }
                         noteVideoFrame(captureMs.toDouble(), sendMs.toDouble())
                         listener.onVideoFrame(annexB)
                         if (isKeyframe) {
@@ -189,15 +204,22 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
                     }
 
                     override fun onIncomplete(frameId: Long, missingSeqs: IntArray, isKeyframe: Boolean) {
+                        synchronized(udpStateLock) { qosIncompleteFramesWindow++ }
                         handleUdpIncomplete(streamId, frameId, missingSeqs, isKeyframe)
                     }
 
                     override fun onLateDrop(frameId: Long) {
+                        synchronized(udpStateLock) { qosLateFramesWindow++ }
                         handleUdpLateDrop(frameId)
                     }
                 },
             )
         }
+        startQosTimer()
+    }
+
+    fun noteUdpDecodeError() {
+        synchronized(udpStateLock) { qosDecodeErrorsWindow++ }
     }
 
     private fun handleUdpIncomplete(
@@ -210,6 +232,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         val needKeyframe = synchronized(udpStateLock) {
             val need = shouldRequestKeyframeAfterUdpLoss(isKeyframe)
             if (nackedUdpFrames.add(frameId)) {
+                qosNacksWindow++
                 sendControl(
                     mapOf(
                         "type" to WireMessage.nack,
@@ -239,14 +262,101 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     }
 
     fun stopUdpVideo() {
+        stopQosTimer()
         udpVideoReceiver?.stop()
         udpVideoReceiver = null
         udpVideoStreamId = null
         synchronized(udpStateLock) {
             nackedUdpFrames.clear()
             udpAwaitingKeyframe = true
+            qosLateFramesWindow = 0
+            qosIncompleteFramesWindow = 0
+            qosDecodeErrorsWindow = 0
+            qosNacksWindow = 0
+            qosFramesWindow = 0
+            consecutiveBadQosWindows = 0
         }
     }
+
+    private fun startQosTimer() {
+        stopQosTimer()
+        qosFuture = scheduler.scheduleAtFixedRate({
+            if (udpVideoReceiver == null) return@scheduleAtFixedRate
+            publishQosWindow()
+        }, QOS_INTERVAL_MS, QOS_INTERVAL_MS, TimeUnit.MILLISECONDS)
+    }
+
+    private fun stopQosTimer() {
+        qosFuture?.cancel(false)
+        qosFuture = null
+    }
+
+    private fun publishQosWindow() {
+        val receiver = udpVideoReceiver ?: return
+        val snapshot = receiver.snapshotQosAndReset()
+        val window = synchronized(udpStateLock) {
+            QosWindowCounters(
+                lateFrames = qosLateFramesWindow,
+                incompleteFrames = qosIncompleteFramesWindow,
+                decodeErrors = qosDecodeErrorsWindow,
+                nacks = qosNacksWindow,
+                frames = qosFramesWindow,
+            ).also {
+                qosLateFramesWindow = 0
+                qosIncompleteFramesWindow = 0
+                qosDecodeErrorsWindow = 0
+                qosNacksWindow = 0
+                qosFramesWindow = 0
+            }
+        }
+        val nackRate = if (window.frames > 0) window.nacks.toDouble() / window.frames else 0.0
+        sendControl(
+            UdpHealthPolicy.qosMap(
+                lossPct = snapshot.lossPct,
+                jitterMs = snapshot.jitterMs,
+                nackRate = nackRate,
+                lateFrames = window.lateFrames,
+                fecRecoveries = snapshot.fecRecoveries,
+            ),
+        )
+        if (UdpHealthPolicy.shouldRequestKeyframe(
+                lateFrames = window.lateFrames,
+                incompleteFrames = window.incompleteFrames,
+                decodeErrors = window.decodeErrors,
+            )
+        ) {
+            sendControl(mapOf("type" to "kf"))
+        }
+        synchronized(udpStateLock) {
+            if (snapshot.lossPct >= 20.0) {
+                consecutiveBadQosWindows++
+            } else if (snapshot.lossPct < 5.0) {
+                consecutiveBadQosWindows = 0
+            }
+            if (UdpHealthPolicy.shouldFallbackToTcp(snapshot.lossPct, consecutiveBadQosWindows)) {
+                preferTcpVideo = true
+                consecutiveBadQosWindows = 0
+                val streamId = udpVideoStreamId ?: 0
+                stopUdpVideo()
+                sendControl(
+                    mapOf(
+                        "type" to WireMessage.transportSelected,
+                        "video" to "tcp",
+                        "control" to "tcp",
+                        "streamId" to streamId,
+                    ),
+                )
+            }
+        }
+    }
+
+    private data class QosWindowCounters(
+        val lateFrames: Int,
+        val incompleteFrames: Int,
+        val decodeErrors: Int,
+        val nacks: Int,
+        val frames: Int,
+    )
 
     /**
      * Like [sendControl], but blocks until the write flushes (or [timeoutMs]
@@ -402,7 +512,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         }
         val port = (map["udpPort"] as? Number)?.toInt()
         val streamId = (map["streamId"] as? Number)?.toInt()
-        if (udpVideoEnabled && "udp" in video && port != null && streamId != null) {
+        if (udpVideoEnabled && !preferTcpVideo && "udp" in video && port != null && streamId != null) {
             try {
                 startUdpVideo(port, streamId)
                 sendControl(
@@ -632,6 +742,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         val offersUdp = shouldOfferUdpVideo(
             isLoopback = clientSocket?.inetAddress?.isLoopbackAddress == true,
             udpVideoEnabled = udpVideoEnabled,
+            preferTcpVideo = preferTcpVideo,
         )
         sendFrame(
             helloJson(
@@ -707,9 +818,13 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         private const val TAG = "ReceiverSession"
         private const val MAX_SAMPLES = 120
         private const val WATCHDOG_MS = 5_000L
+        private const val QOS_INTERVAL_MS = 500L
 
-        fun shouldOfferUdpVideo(isLoopback: Boolean, udpVideoEnabled: Boolean): Boolean =
-            udpVideoEnabled && !isLoopback
+        fun shouldOfferUdpVideo(
+            isLoopback: Boolean,
+            udpVideoEnabled: Boolean,
+            preferTcpVideo: Boolean = false,
+        ): Boolean = udpVideoEnabled && !isLoopback && !preferTcpVideo
 
         fun helloJson(
             wide: Int,
