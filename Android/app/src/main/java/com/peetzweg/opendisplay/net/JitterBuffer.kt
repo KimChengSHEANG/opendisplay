@@ -7,8 +7,8 @@ import java.util.SortedMap
  *
  * Complete frames release [targetDelayMs] after they become whole — not after
  * Mac capture time — so clock skew cannot inflate e2e latency. Late frames
- * relative to the playout head are dropped; incomplete frames NACK until
- * [maxDelayMs] then give up.
+ * relative to the playout head are dropped; incomplete frames are held until
+ * reorder give-up ([maxDelayMs]), then dropped (IDR requested by session).
  */
 class JitterBuffer(
     private val targetDelayMs: Long = 20,

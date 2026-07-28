@@ -109,7 +109,7 @@ class JitterBufferTest {
     }
 
     @Test
-    fun incomplete_waits_full_wifi_nack_window() {
+    fun incomplete_waits_reorder_window() {
         val incomplete = mutableListOf<Pair<Long, IntArray>>()
         val buffer = JitterBuffer(
             targetDelayMs = UdpJitterTiming.TARGET_DELAY_MS,
