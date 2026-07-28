@@ -1815,7 +1815,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func sendFramed(_ payload: Data, keyframe: Bool = false, captureMs: UInt64 = 0) {
         guard connectionReady else { return }
-        if videoViaUdp, let udp = udpVideoSender, udp.isReady {
+        if videoViaUdp {
+            guard let udp = udpVideoSender, udp.isReady else {
+                pipelineLock.lock()
+                dropsNetThisWindow += 1
+                dropsNetTotal += 1
+                pipelineLock.unlock()
+                return
+            }
             let ok = udp.sendFrame(au: payload, keyframe: keyframe, captureMs: captureMs)
             if ok {
                 framesSent += 1

@@ -2,9 +2,11 @@ import Foundation
 import Network
 
 /// Paced UDP video sender with retransmit cache for NACK recovery.
+/// All mutable state and NWConnection sends are serialized on `queue`.
 @available(macOS 14.0, *)
 final class UdpVideoSender {
     private let queue: DispatchQueue
+    private static let queueKey = DispatchSpecificKey<UInt8>()
     private var connection: NWConnection?
     private var nextSeq: UInt16 = 0
     private var nextFrameId: UInt32 = 1
@@ -18,14 +20,16 @@ final class UdpVideoSender {
     private var retransmitCache: [UInt16: Data] = [:]
     private var retransmitCacheOrder: [UInt16] = []
     private let retransmitCacheLimit = 2048
-    private(set) var isReady = false
+    private var ready = false
 
-    var pendingCount: Int { pendingDatagrams }
+    var pendingCount: Int { onQueue { pendingDatagrams } }
+    var isReady: Bool { onQueue { ready } }
     var onReady: (() -> Void)?
     var onFailed: ((String) -> Void)?
 
     init(queue: DispatchQueue) {
         self.queue = queue
+        queue.setSpecific(key: Self.queueKey, value: 1)
     }
 
     convenience init(host: NWEndpoint.Host, port: NWEndpoint.Port, queue: DispatchQueue) {
@@ -34,47 +38,73 @@ final class UdpVideoSender {
     }
 
     func updateBitrate(_ bitrate: Int) {
-        encodeBitrate = max(1_000_000, bitrate)
+        onQueue { encodeBitrate = max(1_000_000, bitrate) }
     }
 
     func updateFecPct(_ pct: Int) {
-        fecPct = max(0, min(50, pct))
+        onQueue { fecPct = max(0, min(50, pct)) }
     }
 
     func connect(host: NWEndpoint.Host, port: NWEndpoint.Port) {
-        disconnect()
-        let params = NWParameters.udp
-        params.allowLocalEndpointReuse = true
-        let conn = NWConnection(host: host, port: port, using: params)
-        connection = conn
-        conn.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
-            self.queue.async {
-                switch state {
-                case .ready:
-                    self.isReady = true
-                    Log.info("UDP video ready → \(host.debugDescription):\(port.rawValue)")
-                    self.onReady?()
-                case .failed(let err):
-                    self.isReady = false
-                    Log.info("UDP video failed: \(err)")
-                    self.onFailed?(String(describing: err))
-                case .cancelled:
-                    self.isReady = false
-                default:
-                    break
+        onQueue {
+            disconnectOnQueue()
+            let params = NWParameters.udp
+            params.allowLocalEndpointReuse = true
+            let conn = NWConnection(host: host, port: port, using: params)
+            connection = conn
+            conn.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                self.queue.async {
+                    switch state {
+                    case .ready:
+                        self.ready = true
+                        Log.info("UDP video ready → \(host.debugDescription):\(port.rawValue)")
+                        self.onReady?()
+                    case .failed(let err):
+                        self.ready = false
+                        Log.info("UDP video failed: \(err)")
+                        self.onFailed?(String(describing: err))
+                    case .cancelled:
+                        self.ready = false
+                    default:
+                        break
+                    }
                 }
             }
+            conn.start(queue: queue)
         }
-        conn.start(queue: queue)
     }
 
     func stop() {
-        disconnect()
+        onQueue { disconnectOnQueue() }
     }
 
     func disconnect() {
-        isReady = false
+        onQueue { disconnectOnQueue() }
+    }
+
+    @discardableResult
+    func sendFrame(au: Data, keyframe: Bool, captureMs: UInt64) -> Bool {
+        onQueue { sendFrameOnQueue(au: au, keyframe: keyframe, captureMs: captureMs) }
+    }
+
+    func handleNack(missing: [UInt16]) {
+        onQueue { handleNackOnQueue(missing: missing) }
+    }
+
+    // MARK: - Queue helpers
+
+    private var onSenderQueue: Bool {
+        DispatchQueue.getSpecific(key: Self.queueKey) != nil
+    }
+
+    private func onQueue<T>(_ work: () -> T) -> T {
+        if onSenderQueue { return work() }
+        return queue.sync(execute: work)
+    }
+
+    private func disconnectOnQueue() {
+        ready = false
         connection?.cancel()
         connection = nil
         pendingDatagrams = 0
@@ -84,9 +114,8 @@ final class UdpVideoSender {
         retransmitCacheOrder.removeAll()
     }
 
-    @discardableResult
-    func sendFrame(au: Data, keyframe: Bool, captureMs: UInt64) -> Bool {
-        guard isReady, let connection else { return false }
+    private func sendFrameOnQueue(au: Data, keyframe: Bool, captureMs: UInt64) -> Bool {
+        guard ready, let connection else { return false }
         if pendingDatagrams >= maxPendingDatagrams { return false }
         let sendMs = UInt64(Date().timeIntervalSince1970 * 1000)
         let packaged = UdpVideoPackager.packageFrame(
@@ -101,14 +130,14 @@ final class UdpVideoSender {
         nextFrameId &+= 1
         nextSeq = packaged.nextSeq
         for pkt in packaged.packets {
-            cache(seq: pkt.seq, datagram: pkt.datagram)
+            cacheOnQueue(seq: pkt.seq, datagram: pkt.datagram)
         }
-        paceAndSend(packaged.packets, on: connection)
+        paceAndSendOnQueue(packaged.packets, on: connection)
         return true
     }
 
-    func handleNack(missing: [UInt16]) {
-        guard let connection, isReady else { return }
+    private func handleNackOnQueue(missing: [UInt16]) {
+        guard let connection, ready else { return }
         for seq in missing {
             guard let dgram = retransmitCache[seq] else { continue }
             pendingDatagrams += 1
@@ -131,7 +160,7 @@ final class UdpVideoSender {
         return min(maxPaceDelayMs, max(minPaceDelayMs, Double(batchBytes) / Double(budget)))
     }
 
-    private func cache(seq: UInt16, datagram: Data) {
+    private func cacheOnQueue(seq: UInt16, datagram: Data) {
         if retransmitCache[seq] == nil {
             retransmitCacheOrder.append(seq)
         }
@@ -142,7 +171,7 @@ final class UdpVideoSender {
         }
     }
 
-    private func paceAndSend(_ packets: [UdpVideoPackager.Packet], on connection: NWConnection) {
+    private func paceAndSendOnQueue(_ packets: [UdpVideoPackager.Packet], on connection: NWConnection) {
         var index = 0
         func sendNextBatch() {
             guard index < packets.count else { return }
