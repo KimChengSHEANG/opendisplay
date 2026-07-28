@@ -43,7 +43,7 @@ object UdpSendBudget {
 
     fun paceDelayMs(batchBytes: Int, bytesPerMs: Int): Double {
         val budget = maxOf(1, bytesPerMs)
-        return (batchBytes.toDouble() / budget.toDouble()).coerceIn(0.05, 8.0)
+        return (batchBytes.toDouble() / budget.toDouble()).coerceIn(0.05, 4.0)
     }
 
     fun bytesPerMs(encodeBitrate: Int, fecPct: Int): Int {

@@ -216,6 +216,7 @@ class UdpVideoReceiver(
                         annexB = assembled.annexB,
                         isKeyframe = assembled.isKeyframe,
                         seqs = assembled.seqs,
+                        readyAtMs = now,
                     ),
                 )
                 return

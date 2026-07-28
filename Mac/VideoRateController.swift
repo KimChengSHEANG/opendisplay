@@ -4,10 +4,13 @@ struct RateAction {
     var preferTcpNextSession: Bool
 }
 
+/// AIMD bitrate from receiver qos — start near panel budget, cut gently, climb fast
+/// (Sunshine-style: keep picture sharp without cliffing on mild WiFi loss).
 final class VideoRateController {
     private var bitrate: Int
 
-    static let udpInitialBitrate = 8_000_000
+    /// Chromebook panels want high bitrate; 8Mbps felt soft vs TCP's ~36Mbps.
+    static let udpInitialBitrate = 24_000_000
 
     init(initialBitrate: Int) {
         self.bitrate = max(2_000_000, initialBitrate)
@@ -17,15 +20,15 @@ final class VideoRateController {
         if lossPct >= 20 {
             return RateAction(bitrate: nil, forceKeyframe: true, preferTcpNextSession: true)
         }
-        if lossPct > 5 || jitterMs > 25 {
-            bitrate = max(2_000_000, bitrate - 4_000_000)
+        if lossPct > 8 || jitterMs > 30 {
+            bitrate = max(4_000_000, bitrate - 2_000_000)
             return RateAction(bitrate: bitrate, forceKeyframe: false, preferTcpNextSession: false)
         }
-        if nackRate > 0.10 {
+        if nackRate > 0.15 {
             return RateAction(bitrate: nil, forceKeyframe: true, preferTcpNextSession: false)
         }
-        if lossPct < 1 && jitterMs < 10 {
-            bitrate = min(bitrate + 1_000_000, 40_000_000)
+        if lossPct < 2 && jitterMs < 15 {
+            bitrate = min(bitrate + 2_000_000, 40_000_000)
             return RateAction(bitrate: bitrate, forceKeyframe: false, preferTcpNextSession: false)
         }
         return RateAction(bitrate: nil, forceKeyframe: false, preferTcpNextSession: false)

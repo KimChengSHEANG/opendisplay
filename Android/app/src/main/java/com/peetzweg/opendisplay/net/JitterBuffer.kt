@@ -2,6 +2,14 @@ package com.peetzweg.opendisplay.net
 
 import java.util.SortedMap
 
+/**
+ * Small arrival-based jitter buffer (Sunshine/Moonlight style).
+ *
+ * Complete frames release [targetDelayMs] after they become whole — not after
+ * Mac capture time — so clock skew cannot inflate e2e latency. Late frames
+ * relative to the playout head are dropped; incomplete frames NACK until
+ * [maxDelayMs] then give up.
+ */
 class JitterBuffer(
     private val targetDelayMs: Long = 20,
     private val maxDelayMs: Long = 40,
@@ -18,6 +26,8 @@ class JitterBuffer(
         val annexB: ByteArray,
         val isKeyframe: Boolean,
         val seqs: IntArray,
+        /** Local receive time when the frame became complete. */
+        val readyAtMs: Long = 0L,
     )
 
     private data class PartialEntry(
@@ -36,7 +46,8 @@ class JitterBuffer(
             if (frame.captureMs + maxDelayMs < playoutHeadCaptureMs) {
                 return@synchronized frame.frameId
             }
-            completeFrames[frame.frameId] = frame
+            val ready = if (frame.readyAtMs > 0L) frame.readyAtMs else nowMs()
+            completeFrames[frame.frameId] = frame.copy(readyAtMs = ready)
             null
         }
         if (lateFrameId != null) onDropLate(lateFrameId)
@@ -62,10 +73,7 @@ class JitterBuffer(
         val actions = synchronized(lock) { collectDrainActions(nowMs()) }
         for (action in actions) {
             when (action) {
-                is DrainAction.Release -> {
-                    // Catch-up: release every consecutive complete frame at the playout head.
-                    onRelease(action.frame)
-                }
+                is DrainAction.Release -> onRelease(action.frame)
                 is DrainAction.DropLate -> onDropLate(action.frameId)
                 is DrainAction.Incomplete -> onIncomplete(action.frameId, action.missingSeqs)
             }
@@ -99,7 +107,9 @@ class JitterBuffer(
                 break
             }
             val head = completeFrames[headId] ?: break
-            if (head.captureMs + targetDelayMs > now) break
+            // Arrival-based hold: release once the frame has sat in the buffer
+            // for targetDelayMs (Sunshine small jitter), then catch up.
+            if (now - head.readyAtMs < targetDelayMs) break
             releaseConsecutiveFrom(headId, actions)
         }
         return actions

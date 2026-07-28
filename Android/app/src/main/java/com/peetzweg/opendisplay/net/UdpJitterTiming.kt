@@ -1,21 +1,22 @@
 package com.peetzweg.opendisplay.net
 
 /**
- * WiFi UDP jitter / NACK playout window.
+ * WiFi UDP jitter / NACK playout window (Sunshine-style: small hold).
  *
- * Prior 20/40ms deadlines fired before Chromebook WiFi RTT retransmits
- * arrived, causing incomplete → IDR storms worse than TCP head-of-line.
+ * Playout delay is measured from **arrival** of a complete frame, not Mac
+ * capture timestamps (clock skew was adding tens of ms of fake latency).
  */
 object UdpJitterTiming {
-    const val TARGET_DELAY_MS = 50L
-    const val MAX_DELAY_MS = 120L
-    const val MIN_MAX_DELAY_MS = 80L
-    const val MAX_MAX_DELAY_MS = 200L
+    /** ~1 frame at 60fps — smooth WiFi jitter without trailing the cursor. */
+    const val TARGET_DELAY_MS = 16L
+    /** Default incomplete/NACK wait when RTT unknown. */
+    const val MAX_DELAY_MS = 60L
+    const val MIN_MAX_DELAY_MS = 40L
+    const val MAX_MAX_DELAY_MS = 80L
 
-    /** Widen incomplete deadline from measured control RTT when available. */
+    /** Incomplete deadline ≈ RTT + 20ms, clamped for Chromebook WiFi. */
     fun maxDelayMs(rttMs: Double?): Long {
         if (rttMs == null || rttMs <= 0) return MAX_DELAY_MS
-        val fromRtt = (rttMs * 2.0).toLong()
-        return fromRtt.coerceIn(MIN_MAX_DELAY_MS, MAX_MAX_DELAY_MS)
+        return (rttMs + 20.0).toLong().coerceIn(MIN_MAX_DELAY_MS, MAX_MAX_DELAY_MS)
     }
 }

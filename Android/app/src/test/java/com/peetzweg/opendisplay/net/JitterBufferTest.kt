@@ -7,7 +7,7 @@ class JitterBufferTest {
     private var now = 0L
 
     @Test
-    fun releases_in_order_after_target_delay() {
+    fun releases_in_order_after_arrival_target_delay() {
         val released = mutableListOf<Long>()
         val buffer = JitterBuffer(
             targetDelayMs = 20,
@@ -17,6 +17,7 @@ class JitterBufferTest {
             onDropLate = {},
             onIncomplete = { _, _ -> },
         )
+        now = 100
         buffer.offer(
             JitterBuffer.Frame(
                 frameId = 2, complete = true, captureMs = 20,
@@ -29,7 +30,10 @@ class JitterBufferTest {
                 sendMs = 11, annexB = byteArrayOf(1), isKeyframe = true, seqs = intArrayOf(1),
             )
         )
-        now = 30
+        now = 119
+        buffer.drain()
+        assertEquals(emptyList<Long>(), released)
+        now = 120
         buffer.drain()
         assertEquals(listOf(1L, 2L), released)
     }
@@ -79,7 +83,7 @@ class JitterBufferTest {
     }
 
     @Test
-    fun releases_in_order_after_wifi_target_delay() {
+    fun releases_after_wifi_arrival_target() {
         val released = mutableListOf<Long>()
         val buffer = JitterBuffer(
             targetDelayMs = UdpJitterTiming.TARGET_DELAY_MS,
@@ -89,21 +93,19 @@ class JitterBufferTest {
             onDropLate = {},
             onIncomplete = { _, _ -> },
         )
+        now = 0
         buffer.offer(
             JitterBuffer.Frame(
-                frameId = 2, complete = true, captureMs = 20,
-                sendMs = 21, annexB = byteArrayOf(2), isKeyframe = false, seqs = intArrayOf(2),
+                frameId = 1, complete = true, captureMs = 10_000,
+                sendMs = 10_001, annexB = byteArrayOf(1), isKeyframe = true, seqs = intArrayOf(1),
             )
         )
-        buffer.offer(
-            JitterBuffer.Frame(
-                frameId = 1, complete = true, captureMs = 10,
-                sendMs = 11, annexB = byteArrayOf(1), isKeyframe = true, seqs = intArrayOf(1),
-            )
-        )
-        now = 10 + UdpJitterTiming.TARGET_DELAY_MS
+        now = UdpJitterTiming.TARGET_DELAY_MS - 1
         buffer.drain()
-        assertEquals(listOf(1L, 2L), released)
+        assertEquals(emptyList<Long>(), released)
+        now = UdpJitterTiming.TARGET_DELAY_MS
+        buffer.drain()
+        assertEquals(listOf(1L), released)
     }
 
     @Test

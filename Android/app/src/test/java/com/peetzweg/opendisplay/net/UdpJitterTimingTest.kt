@@ -5,16 +5,16 @@ import org.junit.Test
 
 class UdpJitterTimingTest {
     @Test
-    fun defaults_leave_room_for_wifi_nack_rtt() {
-        assertEquals(50L, UdpJitterTiming.TARGET_DELAY_MS)
-        assertEquals(120L, UdpJitterTiming.MAX_DELAY_MS)
+    fun defaults_are_sunshine_small_jitter() {
+        assertEquals(16L, UdpJitterTiming.TARGET_DELAY_MS)
+        assertEquals(60L, UdpJitterTiming.MAX_DELAY_MS)
     }
 
     @Test
     fun maxDelay_scales_with_rtt_and_clamps() {
-        assertEquals(120L, UdpJitterTiming.maxDelayMs(null))
-        assertEquals(80L, UdpJitterTiming.maxDelayMs(10.0)) // 2*10=20 → clamp min 80
-        assertEquals(100L, UdpJitterTiming.maxDelayMs(50.0))
-        assertEquals(200L, UdpJitterTiming.maxDelayMs(200.0)) // 400 → clamp max 200
+        assertEquals(60L, UdpJitterTiming.maxDelayMs(null))
+        assertEquals(40L, UdpJitterTiming.maxDelayMs(5.0)) // 5+20=25 → clamp min 40
+        assertEquals(50L, UdpJitterTiming.maxDelayMs(30.0)) // 30+20
+        assertEquals(80L, UdpJitterTiming.maxDelayMs(200.0)) // 220 → clamp max 80
     }
 }

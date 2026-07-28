@@ -21,7 +21,8 @@ final class UdpVideoSender {
     private let maxFrameDatagrams = 255
     private let batchSize = 12
     private let minPaceDelayMs = 0.05
-    private let maxPaceDelayMs = 8.0
+    /// Tighter than 8ms — large frames leave the wire sooner (still paced).
+    private let maxPaceDelayMs = 4.0
     private var encodeBitrate: Int = 18_000_000
     private var fecPct: Int = UdpVideoProtocol.defaultFecPct
     private var retransmitCache: [UInt16: Data] = [:]
