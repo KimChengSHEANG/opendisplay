@@ -1,7 +1,7 @@
 package com.peetzweg.opendisplay.wire
 
 object WireProtocol {
-    const val version = 2
+    const val version = 3
     const val minSupportedPeer = 1
     const val assumedWhenAbsent = 1
 }
@@ -14,4 +14,8 @@ object WireMessage {
     const val hostSleeping = "hostSleeping"
     /** Receiver → Mac: about to close TCP; includes a `reason` string for diagnostics. */
     const val bye = "bye"
+    const val transportOffer = "transportOffer"
+    const val transportSelected = "transportSelected"
+    const val nack = "nack"
+    const val qos = "qos"
 }

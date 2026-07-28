@@ -11,7 +11,7 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 2
+    static let version = 3
 
     /// Oldest peer protocol version this build still supports. Stays at 1
     /// (support everything) until a deliberate two-phase breaking change
@@ -32,4 +32,8 @@ enum WireMessage {
     static let closing = "closing"                  // phone -> Mac: app quit, end the session for good
     static let hostSleeping = "hostSleeping"        // Mac -> phone: Mac display asleep/locked, reconnect when usable
     static let bye = "bye"                          // phone -> Mac: about to close TCP; `reason` explains why
+    static let transportOffer = "transportOffer"
+    static let transportSelected = "transportSelected"
+    static let nack = "nack"
+    static let qos = "qos"
 }
