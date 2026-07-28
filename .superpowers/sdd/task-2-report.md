@@ -1,58 +1,47 @@
-# Task 2 Report: Reed–Solomon FEC + Frame Packager/Assembler
+# Task 2 Report — qos `incompleteRate` + health policy tests
 
-## Status
+**Status:** DONE  
+**Branch:** sunshine-udp-android  
+**Commit:** 6e11628 — feat(udp): report incompleteRate in qos instead of nackRate
 
-DONE
+## Summary
 
-## Commit
+Replaced qos `nackRate` with `incompleteRate` in `UdpHealthPolicy` and updated unit tests per TDD. Added minimal compile fix in `ReceiverSession.publishQosWindow` so the project builds with the new `qosMap` signature.
 
-- `04b000a feat(udp): add Reed-Solomon FEC packager and frame assembler`
+## TDD steps
 
-## Implementation
+| Step | Result |
+|------|--------|
+| 1. Write failing tests | Added `incomplete_rate_is_incomplete_over_frames`, replaced `qos_map_contains_required_keys` with `qos_map_uses_incomplete_rate_not_nack_rate` |
+| 2. Run tests (expect fail) | FAIL — unresolved `incompleteRate`, wrong `qosMap` signature |
+| 3. Implement policy | Added `incompleteRate()` helper; `qosMap` now emits `"incompleteRate"` (no `"nackRate"`) |
+| 4. Run tests (expect pass) | PASS — 5/5 tests in `UdpHealthPolicyTest` |
+| 5. Commit | 6e11628 |
 
-- Added Kotlin GF(256) systematic Reed–Solomon parity encoding and data-shard recovery.
-- Added the Android frame packager with monotonically increasing 16-bit sequence numbers, keyframe/start/end/parity flags, Task 1's 32-byte header, capture/send timestamps, and FEC parity.
-- Added the Android frame assembler with frame advancement, stale-frame rejection, shard validation, direct assembly, FEC recovery, AU-length restoration, and state clearing after delivery.
-- Added matching Swift datagram construction, payload splitting, Reed–Solomon parity encoding, and frame packaging for the later Mac sender task.
-- Added the brief's Android tests verbatim.
+## Files changed
 
-The packagers prepend a four-byte big-endian AU length before sharding. This is required to remove zero padding after recovery, including when the missing shard is the final data shard. The prefix is removed by the Android assembler before returning `annexB`.
+| File | Change |
+|------|--------|
+| `Android/.../UdpHealthPolicy.kt` | `incompleteRate()` helper; `qosMap(..., incompleteRate, ...)` |
+| `Android/.../UdpHealthPolicyTest.kt` | New/updated tests per brief |
+| `Android/.../ReceiverSession.kt` | **Compile fix only:** `publishQosWindow` passes `incompleteRate = UdpHealthPolicy.incompleteRate(window.incompleteFrames, window.frames)` |
 
-## TDD Evidence
+## Test command & output
 
-1. Added `UdpVideoFecTest.kt` before production code.
-2. Ran the focused test and observed the expected compile failure from unresolved `UdpVideoPackager` and `UdpFrameAssembler` references.
-3. Implemented the minimum RS, packager, and assembler APIs.
-4. Re-ran the focused test; after correcting `UdpFrameAssembler` from an object to the required constructible class, all three tests passed.
-
-## Verification
-
-- `cd Android && ./gradlew :app:testDebugUnitTest --tests com.peetzweg.opendisplay.net.UdpVideoFecTest` — passed.
-- `cd Android && ./gradlew :app:testDebugUnitTest` — passed.
-- `swiftc -typecheck Shared/UdpVideo.swift` — passed.
-- `git diff --check` — passed before commit.
+```bash
+cd Android && ./gradlew :app:testDebugUnitTest --tests com.peetzweg.opendisplay.session.UdpHealthPolicyTest
+# BUILD SUCCESSFUL — 5 tests passed
+```
 
 ## Self-review
 
-- Confirmed data shard indices occupy `0..<dataShardCount` and parity indices follow them.
-- Confirmed FEC recovery pads received short shards only for decoding, then uses the recovered AU length to return exact bytes.
-- Confirmed wrong protocol versions, invalid shard metadata, stale frame IDs, and inconsistent headers are ignored.
-- Confirmed frame IDs and sequence numbers use their protocol-width wraparound behavior.
-- Confirmed no negotiation, socket, jitter, or sender runtime code was added.
+- **Spec alignment:** `incompleteRate = incompleteFrames / frames` (0 when frames == 0); qos map keys match spec (`type`, `lossPct`, `jitterMs`, `incompleteRate`, `lateFrames`, `fecRecoveries`).
+- **Scope:** Did not remove NACK sending or `WireMessage.nack` — deferred to Task 3 as instructed.
+- **ReceiverSession:** Only the `publishQosWindow` call-site changed; NACK window counters (`qosNacksWindow`) remain untouched.
+- **Existing behavior preserved:** `shouldRequestKeyframe`, `shouldFallbackToTcp`, and `FallbackTracker` unchanged.
+- **Concerns:** None. Mac-side still reads `nackRate` until Task 5.
 
-## Concerns
+## Out of scope (later tasks)
 
-None. The pre-existing modification to `.superpowers/sdd/progress.md` was intentionally left unstaged and uncommitted.
-
-## Review Fixes
-
-- Replaced the non-MDS identity-plus-Vandermonde parity rows in Kotlin and Swift with a systematic Cauchy generator, so every set of `dataShardCount` received shards is invertible.
-- Kept the assembler's latest advanced frame ID after state clearing, preventing delayed or duplicate packets from reopening an already delivered frame.
-- Added coverage for the 16+4 review counterexample, multiple data erasures with mixed parity loss, reordered packet delivery, and stale packets after delivery.
-
-### Fix Verification
-
-- RED: `cd Android && ./gradlew :app:testDebugUnitTest --tests com.peetzweg.opendisplay.net.UdpVideoFecTest` — failed as expected: 6 tests completed, 2 failed (16+4 recovery and delayed-packet rejection).
-- GREEN: `cd Android && ./gradlew :app:testDebugUnitTest --tests com.peetzweg.opendisplay.net.UdpVideoFecTest` — `BUILD SUCCESSFUL in 1s`.
-- Full suite: `cd Android && ./gradlew :app:testDebugUnitTest` — `BUILD SUCCESSFUL in 955ms`.
-- Swift: `swiftc -typecheck Shared/UdpVideo.swift` — passed with exit code 0.
+- Task 3: Remove NACK control messages from receiver
+- Task 5: Mac `VideoRateController` / `MacSender` switch to `incompleteRate`
