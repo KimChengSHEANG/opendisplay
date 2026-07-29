@@ -699,6 +699,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("capture started: \(pixelsWide)x\(pixelsHigh)@\(frameRate) display \(display.displayID) mode \(mode.rawValue) localCursor=\(localCursor)")
         let kind = lastHello?.kind ?? "device"
         await status("\(mode == .extend ? "Extending to" : "Mirroring to") \(kind) (\(pixelsWide)×\(pixelsHigh))")
+        if lastHello?.device == "Chromebook" {
+            needsKeyframe = true
+            if let pixelBuffer = lastPixelBuffer {
+                encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
+            }
+            queue.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
+                guard let self, !self.stopped, self.connectionReady else { return }
+                self.needsKeyframe = true
+                if let pixelBuffer = self.lastPixelBuffer {
+                    self.encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()))
+                }
+            }
+        }
     }
 
     func stop() {
