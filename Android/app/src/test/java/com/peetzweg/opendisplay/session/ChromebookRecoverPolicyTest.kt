@@ -18,6 +18,24 @@ class ChromebookRecoverPolicyTest {
     }
 
     @Test
+    fun shouldActOnGreenSample_beforeFirstPaint_ignoresWarmUpGreen() {
+        assertFalse(ChromebookRecoverPolicy.shouldActOnGreenSample(hasPaintedThisConnection = false))
+    }
+
+    @Test
+    fun shouldActOnGreenSample_afterFirstPaint_actsOnSolidGreen() {
+        assertTrue(ChromebookRecoverPolicy.shouldActOnGreenSample(hasPaintedThisConnection = true))
+    }
+
+    @Test
+    fun onGreenScreen_requestsKeyframeNeverTears() {
+        assertEquals(
+            ChromebookRecoverPolicy.Action.RequestKeyframe,
+            ChromebookRecoverPolicy.onGreenScreen(),
+        )
+    }
+
+    @Test
     fun udpDecodeError_requestsKeyframeWithoutTearingTcp() {
         val action = ChromebookRecoverPolicy.onDecodeError(transport = "udp", consecutiveErrors = 2)
         assertEquals(ChromebookRecoverPolicy.Action.RequestKeyframe, action)

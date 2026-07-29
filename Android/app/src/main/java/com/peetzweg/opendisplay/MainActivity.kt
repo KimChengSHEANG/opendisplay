@@ -251,13 +251,20 @@ class MainActivity : ComponentActivity() {
                     decoder = null
                 },
                 onGreenScreen = {
-                    if (allowForcedReconnect()) {
-                        session?.forcePeerReconnect("green screen detected")
-                    } else {
-                        // Mid-session solid green on Chromebook: ask for IDR in
-                        // place — do not RST the Mac (causes the brief glitch).
-                        android.util.Log.w("MainActivity", "green screen — requesting kf, not TCP tear")
+                    // Warm-up ARC VDA is solid green before the first paint —
+                    // ignoring it avoids a TCP tear that flashes black/green.
+                    if (ChromebookRecoverPolicy.shouldActOnGreenSample(paintedThisConnection)) {
+                        // After paint: never tear from PixelCopy green — kf only.
+                        android.util.Log.w(
+                            "MainActivity",
+                            "green screen — requesting kf, not TCP tear",
+                        )
                         session?.sendControl(mapOf("type" to "kf"))
+                    } else {
+                        android.util.Log.d(
+                            "MainActivity",
+                            "green sample ignored (warm-up, not yet painted)",
+                        )
                     }
                 },
                 onControl = { session?.sendControl(it) },

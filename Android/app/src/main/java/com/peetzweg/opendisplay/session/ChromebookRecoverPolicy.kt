@@ -7,8 +7,13 @@ package com.peetzweg.opendisplay.session
  * symptom.
  *
  * Allow a tear only until the first successful paint of the current TCP
- * session (stuck first-connect green). After the panel has painted once,
- * keep the socket and recover in place (keyframes / codec rebuild).
+ * session (stuck first-connect green via no-paint recover). After the panel
+ * has painted once, keep the socket and recover in place (keyframes / codec
+ * rebuild).
+ *
+ * PixelCopy "solid green" during VDA warm-up is normal (uninitialized YUV) —
+ * never treat it as failure before the first paint, and never tear TCP from
+ * green samples after paint (that remount flash is the brief glitch users see).
  */
 object ChromebookRecoverPolicy {
     enum class Action { RequestKeyframe, RebuildCodec, TearSession }
@@ -19,6 +24,20 @@ object ChromebookRecoverPolicy {
      */
     fun allowForceReconnect(hasPaintedThisConnection: Boolean): Boolean =
         !hasPaintedThisConnection
+
+    /**
+     * Whether a PixelCopy solid-green sample should trigger recover at all.
+     * False during VDA allocate / before first paint (warm-up looks green).
+     * True only after at least one decoded frame has been presented.
+     */
+    fun shouldActOnGreenSample(hasPaintedThisConnection: Boolean): Boolean =
+        hasPaintedThisConnection
+
+    /**
+     * Green after a real paint: ask for an IDR in place. Never tear TCP from
+     * PixelCopy green — that remounts ARC VDA and flashes black/green.
+     */
+    fun onGreenScreen(): Action = Action.RequestKeyframe
 
     /**
      * Decode-error recovery — UDP never tears the control TCP socket.

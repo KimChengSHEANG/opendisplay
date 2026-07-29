@@ -104,13 +104,12 @@ fun StreamingScreen(
                     ) {
                         if (started || width <= 0 || height <= 0) return
                         started = true
-                        onSurfaceReady(
-                            VideoDecoder(
-                                holder.surface,
-                                preferSoftware = false,
-                                preferHardwareAvc = chromebook,
-                            ),
+                        val decoder = VideoDecoder(
+                            holder.surface,
+                            preferSoftware = false,
+                            preferHardwareAvc = chromebook,
                         )
+                        onSurfaceReady(decoder)
                         if (chromebook) {
                             greenWatch?.let { handler.removeCallbacks(it) }
                             var checks = 0
@@ -118,20 +117,29 @@ fun StreamingScreen(
                             lateinit var watch: Runnable
                             watch = Runnable {
                                 if (!started) return@Runnable
+                                // Uninitialized VDA is solid green — wait for
+                                // a real frame before PixelCopy samples count.
+                                if (!decoder.hasRendered) {
+                                    handler.postDelayed(watch, 750)
+                                    return@Runnable
+                                }
                                 checks++
                                 sampleGreenScreen(surfaceView) { green ->
                                     if (!started) return@sampleGreenScreen
                                     if (green) {
                                         greenHits++
                                         if (greenHits >= 2) {
-                                            Log.w(TAG, "green screen detected — requesting reconnect")
+                                            Log.w(TAG, "green screen detected — requesting recover")
                                             onGreenScreen()
-                                            return@sampleGreenScreen
+                                            // Keep watching; mid-session green
+                                            // asks for kf, does not remount.
+                                            greenHits = 0
                                         }
                                     } else {
                                         greenHits = 0
                                     }
-                                    if (checks < 8) handler.postDelayed(watch, 750)
+                                    // ~12s of post-paint samples (16 × 750ms).
+                                    if (checks < 16) handler.postDelayed(watch, 750)
                                 }
                             }
                             greenWatch = watch
