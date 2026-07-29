@@ -51,8 +51,8 @@ On-device capture is out of band for CI; unit tests cover shard/FEC maths
 
 | Path | Device | e2e50 | e2e95 | stalls | notes |
 |---|---|---|---|---|---|
-| TCP baseline | | | | | |
-| UDP+FEC paced | | | | | |
+| TCP baseline | Chromebook WiFi | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | Tasks 1–4 code ready for on-device fill (Phase 0) |
+| UDP+FEC paced | Chromebook WiFi | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | Explicit `videoTransport udp`; `udpAutoEnabled` stays false until keep-UDP gate passes on device |
 
 `auto` default: prefer UDP on Android/Chromebook WiFi when the keep-UDP gate
 passes; otherwise TCP. Toggle: `defaults write … videoTransport tcp|udp|auto`.
