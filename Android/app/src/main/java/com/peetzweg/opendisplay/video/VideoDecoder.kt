@@ -99,6 +99,13 @@ class VideoDecoder(
     @Volatile
     private var awaitingSync: Boolean = true
 
+    /**
+     * Once ARC VDA reports a hard failure, fall back to a software AVC
+     * decoder for the rest of this decoder instance (TCP session).
+     */
+    @Volatile
+    private var fallbackToSoftware: Boolean = false
+
     /** Back off after a failed VDA allocate so we don't spam create/configure. */
     @Volatile
     private var nextStartCodecAtMs: Long = 0L
@@ -272,6 +279,10 @@ class VideoDecoder(
             Log.w(TAG, "decodeOne: ${e.message}")
             consecutiveDecodeErrors++
             onDecodeError?.invoke(consecutiveDecodeErrors)
+            if (preferHardwareAvc && !fallbackToSoftware) {
+                fallbackToSoftware = true
+                Log.w(TAG, "VDA failed — falling back to software decode for this session")
+            }
             // VDA often dies after a SurfaceView abandon — rebuild on next IDR.
             releaseCodec()
             keyframeRequested = true
@@ -394,7 +405,7 @@ class VideoDecoder(
     }
 
     private fun createCodec(): MediaCodec {
-        if (preferSoftware) {
+        if (preferSoftware || fallbackToSoftware) {
             for (name in SOFTWARE_AVC_NAMES) {
                 try {
                     return MediaCodec.createByCodecName(name)

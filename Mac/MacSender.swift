@@ -52,7 +52,9 @@ enum StreamQuality: String, CaseIterable, Identifiable {
     /// Chromebook panels are laptop-class (often 2400×1600); phone-tier bitrates
     /// crush desktop text. Use a higher floor when encoding for Cheets.
     func bitrate(forDeviceKind kind: String?) -> Int {
-        kind == "Chromebook" ? 36_000_000 : bitrate
+        // If we ever have to fall back from ARC VDA to software decode,
+        // 36 Mbps is too heavy on some Chromebooks.
+        kind == "Chromebook" ? 18_000_000 : bitrate
     }
 
     var label: String { "\(rawValue)%" }
