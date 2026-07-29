@@ -496,8 +496,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // after the process dies. Retry through that window instead of
         // parking the session on "Failed" until a manual reconnect.
         var vd: VirtualDisplay?
-        for attempt in 0..<8 {
-            if attempt > 0 { try await Task.sleep(for: .seconds(2)) }
+        for attempt in 0..<VirtualDisplayRetry.maxAttempts {
+            let delay = VirtualDisplayRetry.sleepSeconds(beforeAttempt: attempt)
+            if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
             // A Disconnect during the retry window tore the session down. Bail
             // before creating/assigning the display: the serial the old display
             // held is likely free now, so a late attempt would *succeed* and
@@ -641,12 +642,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// The virtual display takes a moment to show up in shareable content.
     private func findSCDisplay(id: CGDirectDisplayID) async throws -> SCDisplay {
-        for _ in 0..<20 {
+        for _ in 0..<40 {
             let content = try await SCShareableContent.current
             if let display = content.displays.first(where: { $0.displayID == id }) {
                 return display
             }
-            try await Task.sleep(for: .milliseconds(250))
+            try await Task.sleep(for: .milliseconds(50))
         }
         throw NSError(domain: "MacSender", code: 3,
                       userInfo: [NSLocalizedDescriptionKey: "virtual display never appeared in SCShareableContent"])

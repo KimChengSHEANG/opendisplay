@@ -26,3 +26,13 @@ struct ConnectTiming {
         return "connectTiming dial→ready=\(fmt(durationMs(from: \.dialStart, to: \.tcpReady)))ms ready→hello=\(fmt(durationMs(from: \.tcpReady, to: \.helloReceived)))ms hello→vd=\(fmt(durationMs(from: \.helloReceived, to: \.virtualDisplayReady)))ms vd→capture=\(fmt(durationMs(from: \.virtualDisplayReady, to: \.captureStarted)))ms capture→encode=\(fmt(durationMs(from: \.captureStarted, to: \.firstEncoded)))ms dial→encode=\(fmt(durationMs(from: \.dialStart, to: \.firstEncoded)))ms"
     }
 }
+
+enum VirtualDisplayRetry {
+    /// Attempt index 0..<maxAttempts → sleep before that attempt (attempt 0 = 0).
+    static func sleepSeconds(beforeAttempt attempt: Int) -> Double {
+        precondition(attempt >= 0)
+        if attempt == 0 { return 0 }
+        return min(1.5, 0.25 * pow(2.0, Double(attempt - 1)))
+    }
+    static let maxAttempts = 8
+}
