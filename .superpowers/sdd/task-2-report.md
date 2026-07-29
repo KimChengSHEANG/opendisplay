@@ -1,47 +1,53 @@
-# Task 2 Report — qos `incompleteRate` + health policy tests
+# Task 2 Report: Emit connect stages on Mac + Android
 
-**Status:** DONE  
-**Branch:** sunshine-udp-android  
-**Commit:** 6e11628 — feat(udp): report incompleteRate in qos instead of nackRate
+## Status: DONE
 
-## Summary
+## Commit
+- `a2179d2` feat(timing): log Mac and Chromebook connect TTFF stages
 
-Replaced qos `nackRate` with `incompleteRate` in `UdpHealthPolicy` and updated unit tests per TDD. Added minimal compile fix in `ReceiverSession.publishQosWindow` so the project builds with the new `qosMap` signature.
+## Changes
 
-## TDD steps
+### Mac (`MacSender.swift`)
+- Added `connectTiming` field alongside session state.
+- Reset + `dialStart` mark at TCP/USB dial entry (`connectTCP`, `connectUSB`).
+- `tcpReady` in `becomeReady`.
+- `helloReceived` when `lastHello` is set in hello handler.
+- `virtualDisplayReady` after `virtualDisplay = vd` in `setupExtend`.
+- `captureStarted` after `stream.startCapture()` in `startCapture`.
+- First successful annex-B encode: `firstEncoded` + `Log.info(connectTiming.summaryLine())`.
 
-| Step | Result |
-|------|--------|
-| 1. Write failing tests | Added `incomplete_rate_is_incomplete_over_frames`, replaced `qos_map_contains_required_keys` with `qos_map_uses_incomplete_rate_not_nack_rate` |
-| 2. Run tests (expect fail) | FAIL — unresolved `incompleteRate`, wrong `qosMap` signature |
-| 3. Implement policy | Added `incompleteRate()` helper; `qosMap` now emits `"incompleteRate"` (no `"nackRate"`) |
-| 4. Run tests (expect pass) | PASS — 5/5 tests in `UdpHealthPolicyTest` |
-| 5. Commit | 6e11628 |
+### Android (`ReceiverSession.kt`)
+- `connectedAtWallMs` / `firstVideoAtWallMs` with private setters.
+- `connectedAtWallMs` set in `handleClient` before `onConnected()`.
+- `firstVideoAtWallMs` set once in `noteVideoFrame`.
+- Both reset in `resetStreamState` and `closeClient`.
 
-## Files changed
+### Android (`MainActivity.kt`)
+- Import `ConnectTimingPolicy`.
+- On first `hasRendered` flip: log `ttff=…ms slow=…` using `session.connectedAtWallMs`.
 
-| File | Change |
-|------|--------|
-| `Android/.../UdpHealthPolicy.kt` | `incompleteRate()` helper; `qosMap(..., incompleteRate, ...)` |
-| `Android/.../UdpHealthPolicyTest.kt` | New/updated tests per brief |
-| `Android/.../ReceiverSession.kt` | **Compile fix only:** `publishQosWindow` passes `incompleteRate = UdpHealthPolicy.incompleteRate(window.incompleteFrames, window.frames)` |
+## Tests
+- `./gradlew :app:testDebugUnitTest --tests com.peetzweg.opendisplay.session.ConnectTimingPolicyTest` — **PASS** (BUILD SUCCESSFUL)
 
-## Test command & output
-
-```bash
-cd Android && ./gradlew :app:testDebugUnitTest --tests com.peetzweg.opendisplay.session.UdpHealthPolicyTest
-# BUILD SUCCESSFUL — 5 tests passed
-```
+## Manual smoke (Step 3)
+**SKIPPED** — no Mac + Chromebook hardware in this environment. Wiring committed; on-device baseline capture deferred.
 
 ## Self-review
 
-- **Spec alignment:** `incompleteRate = incompleteFrames / frames` (0 when frames == 0); qos map keys match spec (`type`, `lossPct`, `jitterMs`, `incompleteRate`, `lateFrames`, `fecRecoveries`).
-- **Scope:** Did not remove NACK sending or `WireMessage.nack` — deferred to Task 3 as instructed.
-- **ReceiverSession:** Only the `publishQosWindow` call-site changed; NACK window counters (`qosNacksWindow`) remain untouched.
-- **Existing behavior preserved:** `shouldRequestKeyframe`, `shouldFallbackToTcp`, and `FallbackTracker` unchanged.
-- **Concerns:** None. Mac-side still reads `nackRate` until Task 5.
+| Check | Result |
+|-------|--------|
+| Mark sites match brief | OK |
+| Field names match brief | OK |
+| Mac log once per connect (first encode) | OK — guarded by `firstEncoded == nil` |
+| Android TTFF once per connection | OK — guarded by `!paintedThisConnection` |
+| Timing reset on reconnect | OK — dial start resets Mac timing; ReceiverSession resets on accept/close |
+| No secrets / unrelated diffs | OK |
 
-## Out of scope (later tasks)
+### Concerns (minor)
+1. **Mac `helloReceived` on rotation/reconnect hellos** — mark fires on every hello, not only the first connect. Stage deltas after the first hello may be misleading on orientation change; acceptable for initial TTFF diagnosis.
+2. **`resetStreamState` before `connectedAtWallMs` in `handleClient`** — intentional: reset clears stale values, then connect time is set immediately before `onConnected()`.
+3. **Manual smoke not run** — baseline A/B numbers not recorded.
 
-- Task 3: Remove NACK control messages from receiver
-- Task 5: Mac `VideoRateController` / `MacSender` switch to `incompleteRate`
+## Expected log samples (when run on device)
+- Mac: `connectTiming dial→ready=…ms ready→hello=…ms hello→vd=…ms vd→capture=…ms capture→encode=…ms dial→encode=…ms`
+- Chromebook: `MainActivity: ttff=1234ms slow=false`
