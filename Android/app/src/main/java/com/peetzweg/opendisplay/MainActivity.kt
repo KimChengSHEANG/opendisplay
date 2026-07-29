@@ -135,6 +135,11 @@ class MainActivity : ComponentActivity() {
     private var lastDecoderKfAtMs: Long = 0
     /** Throttle green-sample recover actions to avoid VDA thrash. */
     private var lastGreenRecoverAtMs: Long = 0
+    /** Throttle keyframe asks triggered by green detection. */
+    private var lastGreenKfAtMs: Long = 0
+    /** Track whether green is persistent across multiple callbacks. */
+    private var lastGreenEventAtMs: Long = 0
+    private var greenEventStreak: Int = 0
     /** Rate-limit forced TCP reconnects so a permanent failure can't loop. */
     private var lastForcedReconnectAtMs: Long = 0
     private var forcedReconnectsWindow = 0
@@ -258,18 +263,30 @@ class MainActivity : ComponentActivity() {
                     if (ChromebookRecoverPolicy.shouldActOnGreenSample(paintedThisConnection)) {
                         val d = decoder
                         val now = System.currentTimeMillis()
-                        // After paint: green samples mean the VDA is wedged.
-                        // Ask the Mac for an IDR, and rebuild the decoder codec
-                        // in place (no TCP tear) to avoid a remount flash.
-                        if (now - lastGreenRecoverAtMs >= 3_000) {
+                        // After paint: green samples mean the VDA might be wedged.
+                        // Always request an IDR first; only rebuild the codec if
+                        // green persists across another callback (to reduce the
+                        // visible ~1s flash caused by releasing/recreating the codec).
+                        greenEventStreak = if (now - lastGreenEventAtMs <= 2_000) {
+                            greenEventStreak + 1
+                        } else {
+                            1
+                        }
+                        lastGreenEventAtMs = now
+                        if (now - lastGreenKfAtMs >= 1_000) {
+                            lastGreenKfAtMs = now
+                            session?.sendControl(mapOf("type" to "kf"))
+                        }
+                        val shouldRebuild = greenEventStreak >= 2 &&
+                            (now - lastGreenRecoverAtMs >= 10_000)
+                        if (shouldRebuild) {
                             lastGreenRecoverAtMs = now
                             d?.rebuildCodecInPlace()
                         }
                         android.util.Log.w(
                             "MainActivity",
-                            "green screen — requesting kf + codec rebuild in place",
+                            "green screen — streak=$greenEventStreak requesting kf${if (shouldRebuild) " + codec rebuild" else ""}",
                         )
-                        session?.sendControl(mapOf("type" to "kf"))
                     } else {
                         android.util.Log.d(
                             "MainActivity",
