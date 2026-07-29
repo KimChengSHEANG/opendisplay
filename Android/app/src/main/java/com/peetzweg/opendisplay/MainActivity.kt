@@ -35,6 +35,7 @@ import com.peetzweg.opendisplay.session.PanelMetrics
 import com.peetzweg.opendisplay.session.PerfStats
 import com.peetzweg.opendisplay.session.ReceiverSession
 import com.peetzweg.opendisplay.session.SessionTelemetry
+import com.peetzweg.opendisplay.session.VideoStallPolicy
 import com.peetzweg.opendisplay.settings.AppSettings
 import com.peetzweg.opendisplay.settings.ConnectionMode
 import com.peetzweg.opendisplay.sleep.HostSleepController
@@ -132,6 +133,63 @@ class MainActivity : ComponentActivity() {
         recoverAttempt = 0
     }
 
+    /**
+     * Mid-session: TCP pings can keep the silence watchdog happy while video
+     * (especially UDP) or ARC VDA is wedged on the last frame. Poll age of the
+     * last video AU and escalate kf → in-place codec rebuild.
+     */
+    private val stallWatchScheduled = AtomicBoolean(false)
+    private var lastStallKfAtMs: Long = 0
+    private var lastStallRebuildAtMs: Long = 0
+    private val stallWatchRunnable = object : Runnable {
+        override fun run() {
+            stallWatchScheduled.set(false)
+            val s = session
+            if (s?.isConnected != true) return
+            val action = VideoStallPolicy.action(
+                ageMs = s.videoFrameAgeMs(),
+                hasPaintedThisConnection = paintedThisConnection,
+                connected = true,
+            )
+            val now = System.currentTimeMillis()
+            when (action) {
+                VideoStallPolicy.Action.None -> Unit
+                VideoStallPolicy.Action.RequestKeyframe -> {
+                    if (now - lastStallKfAtMs >= 1_000) {
+                        lastStallKfAtMs = now
+                        s.sendControl(mapOf("type" to "kf"))
+                        android.util.Log.w("MainActivity", "video stall — requesting kf")
+                    }
+                }
+                VideoStallPolicy.Action.RebuildCodec -> {
+                    if (now - lastStallRebuildAtMs >= 10_000) {
+                        lastStallRebuildAtMs = now
+                        lastStallKfAtMs = now
+                        decoder?.rebuildCodecInPlace()
+                        s.sendControl(mapOf("type" to "kf"))
+                        android.util.Log.w("MainActivity", "video stall — codec rebuild + kf")
+                    } else if (now - lastStallKfAtMs >= 1_000) {
+                        lastStallKfAtMs = now
+                        s.sendControl(mapOf("type" to "kf"))
+                    }
+                }
+            }
+            scheduleStallWatch()
+        }
+    }
+
+    private fun scheduleStallWatch() {
+        if (!isChromebook) return
+        if (session?.isConnected != true) return
+        if (!stallWatchScheduled.compareAndSet(false, true)) return
+        mainHandler.postDelayed(stallWatchRunnable, 1_000L)
+    }
+
+    private fun cancelStallWatch() {
+        mainHandler.removeCallbacks(stallWatchRunnable)
+        stallWatchScheduled.set(false)
+    }
+
     /** Throttle decoder-driven keyframe asks so scroll doesn't IDR-spam. */
     private var lastDecoderKfAtMs: Long = 0
     /** Throttle green-sample recover actions to avoid VDA thrash. */
@@ -175,6 +233,7 @@ class MainActivity : ComponentActivity() {
         },
         stopAccepting = {
             cancelRecover()
+            cancelStallWatch()
             session?.stop(reason = "screenOff/stop")
             connected = false
         },
@@ -420,6 +479,7 @@ class MainActivity : ComponentActivity() {
         decoder?.release()
         decoder = null
         cancelRecover()
+        cancelStallWatch()
     }
 
     /** Rotation: keep the session alive, just tell the Mac about the new panel — see `ReceiverSession.updatePanel`. */
@@ -543,6 +603,7 @@ class MainActivity : ComponentActivity() {
                 val panel = PanelMetrics.of(this@MainActivity)
                 session?.updatePanel(panel.wide, panel.high, panel.density)
                 perf = PerfStats()
+                scheduleStallWatch()
             }
         }
 
@@ -552,6 +613,7 @@ class MainActivity : ComponentActivity() {
                 cursorController.hide()
                 pendingSyncFrame = null
                 cancelRecover()
+                cancelStallWatch()
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 // Mac parks after hostSleeping then ends TCP. Clear the blank
                 // overlay so we don't look frozen/unclickable until a mystery tap;

@@ -119,6 +119,13 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
 
     val isConnected: Boolean get() = clientSocket != null
 
+    /** Ms since the last video AU, or null if none received this connection. */
+    fun videoFrameAgeMs(nowMs: Long = System.currentTimeMillis()): Long? {
+        val last = synchronized(perfLock) { lastFrameAtMs }
+        if (last <= 0L) return null
+        return (nowMs - last).coerceAtLeast(0L)
+    }
+
     fun start() {
         if (running) return
         running = true

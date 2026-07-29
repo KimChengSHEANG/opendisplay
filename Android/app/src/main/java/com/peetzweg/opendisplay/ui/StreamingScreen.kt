@@ -138,8 +138,11 @@ fun StreamingScreen(
                                     } else {
                                         greenHits = 0
                                     }
-                                    // ~12s of post-paint samples (16 × 750ms).
-                                    if (checks < 16) handler.postDelayed(watch, 750)
+                                    // Keep sampling for the whole session —
+                                    // long-idle ARC VDA wedges after the old
+                                    // ~12s warm-up window used to stop watching.
+                                    val nextMs = if (checks < 16) 750L else 2_000L
+                                    handler.postDelayed(watch, nextMs)
                                 }
                             }
                             greenWatch = watch
