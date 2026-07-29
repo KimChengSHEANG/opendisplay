@@ -13,9 +13,9 @@ package com.peetzweg.opendisplay.session
  */
 object VideoStallPolicy {
     /** Ask for an IDR once video has been quiet this long. */
-    const val KEYFRAME_AFTER_MS = 2_000L
+    const val KEYFRAME_AFTER_MS = 4_000L
     /** Rebuild ARC VDA in place if still quiet after keyframe asks. */
-    const val REBUILD_AFTER_MS = 5_000L
+    const val REBUILD_AFTER_MS = 12_000L
 
     enum class Action { None, RequestKeyframe, RebuildCodec }
 

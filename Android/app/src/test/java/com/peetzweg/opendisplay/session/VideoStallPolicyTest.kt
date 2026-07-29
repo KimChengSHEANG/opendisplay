@@ -17,7 +17,7 @@ class VideoStallPolicyTest {
     }
 
     @Test
-    fun quietTwoSeconds_requestsKeyframe() {
+    fun quietFourSeconds_requestsKeyframe() {
         assertEquals(
             VideoStallPolicy.Action.RequestKeyframe,
             VideoStallPolicy.action(
@@ -29,7 +29,7 @@ class VideoStallPolicyTest {
     }
 
     @Test
-    fun quietFiveSeconds_rebuildsCodec() {
+    fun quietTwelveSeconds_rebuildsCodec() {
         assertEquals(
             VideoStallPolicy.Action.RebuildCodec,
             VideoStallPolicy.action(

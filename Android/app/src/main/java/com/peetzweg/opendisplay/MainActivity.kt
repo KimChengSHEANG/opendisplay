@@ -156,20 +156,21 @@ class MainActivity : ComponentActivity() {
             when (action) {
                 VideoStallPolicy.Action.None -> Unit
                 VideoStallPolicy.Action.RequestKeyframe -> {
-                    if (now - lastStallKfAtMs >= 1_000) {
+                    // Don't IDR-spam: each keyframe is a bitrate spike + hitch.
+                    if (now - lastStallKfAtMs >= 2_500) {
                         lastStallKfAtMs = now
                         s.sendControl(mapOf("type" to "kf"))
                         android.util.Log.w("MainActivity", "video stall — requesting kf")
                     }
                 }
                 VideoStallPolicy.Action.RebuildCodec -> {
-                    if (now - lastStallRebuildAtMs >= 10_000) {
+                    if (now - lastStallRebuildAtMs >= 30_000) {
                         lastStallRebuildAtMs = now
                         lastStallKfAtMs = now
                         decoder?.rebuildCodecInPlace()
                         s.sendControl(mapOf("type" to "kf"))
                         android.util.Log.w("MainActivity", "video stall — codec rebuild + kf")
-                    } else if (now - lastStallKfAtMs >= 1_000) {
+                    } else if (now - lastStallKfAtMs >= 2_500) {
                         lastStallKfAtMs = now
                         s.sendControl(mapOf("type" to "kf"))
                     }

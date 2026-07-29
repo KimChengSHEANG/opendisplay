@@ -110,8 +110,9 @@ enum StreamFrameRate: Int, CaseIterable, Identifiable {
     }
 
     static func `default`(forDeviceKind kind: String?) -> StreamFrameRate {
-        // Chromebook VDA handles full-panel @ 60 like iPhone HW decode.
-        .fps60
+        // Full-panel Chromebook @ 60 over WiFi TCP routinely stalls (encode +
+        // ARC decode + send backpressure). Prefer 30 until the user opts up.
+        kind == "Chromebook" ? .fps30 : .fps60
     }
 }
 

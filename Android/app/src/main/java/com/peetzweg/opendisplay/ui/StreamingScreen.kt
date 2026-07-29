@@ -138,11 +138,11 @@ fun StreamingScreen(
                                     } else {
                                         greenHits = 0
                                     }
-                                    // Keep sampling for the whole session —
-                                    // long-idle ARC VDA wedges after the old
-                                    // ~12s warm-up window used to stop watching.
-                                    val nextMs = if (checks < 16) 750L else 2_000L
-                                    handler.postDelayed(watch, nextMs)
+                                    // Warm-up only (~12s). Continuous PixelCopy
+                                    // mid-session hitch the ARC compositor and
+                                    // false kf/rebuild storms look like stalls.
+                                    // Long-idle freezes are covered by VideoStallPolicy.
+                                    if (checks < 16) handler.postDelayed(watch, 750)
                                 }
                             }
                             greenWatch = watch
