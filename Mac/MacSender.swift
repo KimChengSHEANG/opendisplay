@@ -309,6 +309,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private let disconnectGraceSeconds: TimeInterval = 10
 
     private var lastHello: PhoneInfo?
+    private var connectTiming = ConnectTiming()
     private var helloContinuation: CheckedContinuation<PhoneInfo, Error>?
     private var inputInjector: InputInjector?
 
@@ -523,6 +524,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                           userInfo: [NSLocalizedDescriptionKey: "CGVirtualDisplay creation failed"])
         }
         virtualDisplay = vd
+        connectTiming.mark(\.virtualDisplayReady)
         inputInjector = InputInjector(displayID: vd.displayID)
 
         let display = try await findSCDisplay(id: vd.displayID)
@@ -683,6 +685,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await stream.startCapture()
+        connectTiming.mark(\.captureStarted)
         self.stream = stream
         captureDisplayID = display.displayID
         lastCursorPNGHash = 0      // rotation rebuilds: re-send the sprite
@@ -918,6 +921,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Bookkeeping shared by both transports once a connection is live.
     private func becomeReady(_ conn: NWConnection) {
         Log.info("connection ready to \(endpointName)")
+        connectTiming.mark(\.tcpReady)
         connectionReady = true
         everConnected = true
         // Keep `awaitingWake` until hello — ADB forward can report TCP ready
@@ -945,6 +949,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func connectTCP(_ endpoint: NWEndpoint) {
+        connectTiming = ConnectTiming()
+        connectTiming.mark(\.dialStart)
         let options = NWProtocolTCP.Options()
         options.noDelay = true   // latency matters more than throughput here
         let params = NWParameters(tls: nil, tcp: options)
@@ -1000,6 +1006,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Dial through macOS's built-in usbmuxd — no external tunnel needed.
     /// The handshake is async, so adoption is gated on `dialGeneration`.
     private func connectUSB(udid: String?, port: UInt16) {
+        connectTiming = ConnectTiming()
+        connectTiming.mark(\.dialStart)
         dialGeneration += 1
         let generation = dialGeneration
         Task { [weak self] in
@@ -1320,6 +1328,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if let info = try? JSONDecoder().decode(PhoneInfo.self, from: payload) {
                 let previous = lastHello
                 lastHello = info
+                connectTiming.mark(\.helloReceived)
                 awaitingWake = false
                 Task { @MainActor in self.onHello?(info) }
                 // Version handshake (issue #132). Reply with our identity, and
@@ -1700,6 +1709,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.pendingEncodes = max(0, self.pendingEncodes - 1)
             self.pipelineLock.unlock()
             if status == noErr, let buffer, let data = self.annexB(from: buffer) {
+                if self.connectTiming.firstEncoded == nil {
+                    self.connectTiming.mark(\.firstEncoded)
+                    Log.info(self.connectTiming.summaryLine())
+                }
                 let keyframe = self.isKeyframe(buffer)
                 let capture = UInt64(capturedAtMs)
                 if self.videoViaUdp {

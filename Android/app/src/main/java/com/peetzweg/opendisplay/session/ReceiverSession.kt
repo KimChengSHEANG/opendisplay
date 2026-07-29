@@ -52,6 +52,11 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
 
     internal var testHookSendControl: ((Map<String, Any>) -> Unit)? = null
 
+    @Volatile var connectedAtWallMs: Long = 0L
+        private set
+    @Volatile var firstVideoAtWallMs: Long = 0L
+        private set
+
     @Volatile private var running = false
     /** True while the accept loop has an open ServerSocket. Mirrors iOS `listenerHealthy`. */
     @Volatile private var listenerHealthy = false
@@ -461,6 +466,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
         outputStream = socket.getOutputStream()
         lastDataReceivedMs.set(System.currentTimeMillis())
         startLivenessTimers()
+        connectedAtWallMs = System.currentTimeMillis()
         listener.onConnected()
         sendHello()
         val thread = Thread({ readLoop(socket) }, "ReceiverSession-read")
@@ -595,6 +601,7 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
 
     private fun noteVideoFrame(captureMs: Double?, sendMs: Double?) {
         val now = System.currentTimeMillis()
+        if (firstVideoAtWallMs == 0L) firstVideoAtWallMs = now
         var snapshot: PerfWindowResult? = null
         synchronized(perfLock) {
             if (lastFrameAtMs > 0) {
@@ -726,6 +733,8 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     }
 
     private fun resetStreamState() {
+        connectedAtWallMs = 0L
+        firstVideoAtWallMs = 0L
         preferTcpVideo = false
         synchronized(udpStateLock) {
             fallbackTracker.reset()
@@ -822,6 +831,8 @@ class ReceiverSession(private val port: Int = DEFAULT_PORT, private val listener
     private fun closeClient(reason: String, notify: Boolean, announceBye: Boolean) {
         stopLivenessTimers()
         stopUdpVideo()
+        connectedAtWallMs = 0L
+        firstVideoAtWallMs = 0L
         preferTcpVideo = false
         val had = clientSocket != null
         if (had) {

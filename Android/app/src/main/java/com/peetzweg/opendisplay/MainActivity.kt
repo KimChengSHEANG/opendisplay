@@ -30,6 +30,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.peetzweg.opendisplay.net.DiscoveryAdvertiser
 import com.peetzweg.opendisplay.session.ChromebookRecoverPolicy
+import com.peetzweg.opendisplay.session.ConnectTimingPolicy
 import com.peetzweg.opendisplay.session.InstallId
 import com.peetzweg.opendisplay.session.PanelMetrics
 import com.peetzweg.opendisplay.session.PerfStats
@@ -638,7 +639,16 @@ class MainActivity : ComponentActivity() {
             }
             // Non-blocking: decode runs on VideoDecoder's thread (iOS-style).
             d.feedAnnexB(data)
-            if (d.hasRendered) paintedThisConnection = true
+            if (d.hasRendered) {
+                val s = session
+                val connectedAt = s?.connectedAtWallMs ?: 0L
+                if (connectedAt > 0L && !paintedThisConnection) {
+                    val ttff = System.currentTimeMillis() - connectedAt
+                    val slow = ConnectTimingPolicy.isSlowTtff(ttff)
+                    android.util.Log.i("MainActivity", "ttff=${ttff}ms slow=$slow")
+                }
+                paintedThisConnection = true
+            }
             // Mid-session VDA death clears hasRendered — re-arm recover so we
             // don't stay black until the user manually reconnects.
             if (!d.hasRendered && session?.isConnected == true) {
