@@ -642,7 +642,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// The virtual display takes a moment to show up in shareable content.
     private func findSCDisplay(id: CGDirectDisplayID) async throws -> SCDisplay {
-        for _ in 0..<40 {
+        for _ in 0..<100 {
             let content = try await SCShareableContent.current
             if let display = content.displays.first(where: { $0.displayID == id }) {
                 return display
