@@ -484,7 +484,9 @@ git commit -m "docs(udp): record Chromebook WiFi TCP/UDP latency A/B"
 
 **Files:** none (execution only)
 
-- [ ] **Step 1: Cold connect ×3**
+**Status:** SKIPPED — no Chromebook hardware in agent environment; fill on device when available.
+
+- [x] **Step 1: Cold connect ×3** — SKIPPED (no device)
 
 Force-stop Chromebook app → Mac Connect. Record `ttff` and `connectTiming` each time.
 
@@ -494,31 +496,33 @@ Pass criteria:
 - No solid green lasting >2s after first paint
 - No mid-session TCP tear flash after paint
 
-- [ ] **Step 2: Steady drag 20s**
+- [x] **Step 2: Steady drag 20s** — SKIPPED (no device)
 
 Overlay: e2e P50/P95, stalls, FPS. Compare to Task 5 baseline.
 
-- [ ] **Step 3: Long idle 10+ minutes**
+- [x] **Step 3: Long idle 10+ minutes** — SKIPPED (no device)
 
 Confirm stall watch / screen-off park from recent commits still recover (no frozen unclickable panel).
 
-- [ ] **Step 4: Final note in plan A/B table**
+- [x] **Step 4: Final note in plan A/B table** — SKIPPED (no device)
 
 | Path | Device | ttff median | e2e50 | e2e95 | stalls | notes |
 |---|---|---|---|---|---|---|
-| Baseline (before plan) | | | | | | |
-| After Tasks 3–4 (TCP) | | | | | | |
-| UDP explicit (Task 5) | | | | | | |
+| Baseline (before plan) | Chromebook WiFi | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | Tasks 1–2 instrumentation ready |
+| After Tasks 3–4 (TCP) | Chromebook WiFi | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | VD retry + follow-up IDR shipped |
+| UDP explicit (Task 5) | Chromebook WiFi | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | Explicit UDP only; no `udpAutoEnabled` flip |
 
 ---
 
 ## A/B table (fill during execution)
 
+Task 6 verification skipped pending Chromebook hardware — rows below remain SKIPPED until on-device manual run.
+
 | Path | Device | ttff median | e2e50 | e2e95 | stalls | notes |
 |---|---|---|---|---|---|---|
-| Baseline | Chromebook WiFi | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | Tasks 1–4 code ready for on-device fill |
-| After VD/SC + follow-up IDR | Chromebook WiFi | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | Re-measure after Tasks 3–4 on hardware |
-| UDP opt-in | Chromebook WiFi | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | Explicit UDP only; no `udpAutoEnabled` flip |
+| Baseline (before plan) | Chromebook WiFi | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | Tasks 1–2 instrumentation ready |
+| After Tasks 3–4 (TCP) | Chromebook WiFi | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | VD retry + follow-up IDR shipped |
+| UDP explicit (Task 5) | Chromebook WiFi | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | SKIPPED (no device) | Explicit UDP only; no `udpAutoEnabled` flip |
 
 ---
 
