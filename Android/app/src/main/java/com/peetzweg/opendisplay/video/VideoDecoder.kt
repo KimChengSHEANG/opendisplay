@@ -163,6 +163,25 @@ class VideoDecoder(
         decodeExecutor.shutdown()
     }
 
+    /**
+     * Recover an ARC VDA wedge without tearing the TCP session.
+     *
+     * Keeps SPS/PPS so the next IDR can quickly reconfigure. This is
+     * intentionally decode-thread-only to avoid races with `decodeOne()`.
+     */
+    fun rebuildCodecInPlace() {
+        if (released.get()) return
+        try {
+            decodeExecutor.execute {
+                synchronized(this@VideoDecoder) {
+                    releaseCodec()
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            synchronized(this) { releaseCodec() }
+        }
+    }
+
     private fun drainQueue() {
         try {
             while (!released.get()) {

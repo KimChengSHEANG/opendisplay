@@ -133,6 +133,8 @@ class MainActivity : ComponentActivity() {
 
     /** Throttle decoder-driven keyframe asks so scroll doesn't IDR-spam. */
     private var lastDecoderKfAtMs: Long = 0
+    /** Throttle green-sample recover actions to avoid VDA thrash. */
+    private var lastGreenRecoverAtMs: Long = 0
     /** Rate-limit forced TCP reconnects so a permanent failure can't loop. */
     private var lastForcedReconnectAtMs: Long = 0
     private var forcedReconnectsWindow = 0
@@ -254,10 +256,18 @@ class MainActivity : ComponentActivity() {
                     // Warm-up ARC VDA is solid green before the first paint —
                     // ignoring it avoids a TCP tear that flashes black/green.
                     if (ChromebookRecoverPolicy.shouldActOnGreenSample(paintedThisConnection)) {
-                        // After paint: never tear from PixelCopy green — kf only.
+                        val d = decoder
+                        val now = System.currentTimeMillis()
+                        // After paint: green samples mean the VDA is wedged.
+                        // Ask the Mac for an IDR, and rebuild the decoder codec
+                        // in place (no TCP tear) to avoid a remount flash.
+                        if (now - lastGreenRecoverAtMs >= 3_000) {
+                            lastGreenRecoverAtMs = now
+                            d?.rebuildCodecInPlace()
+                        }
                         android.util.Log.w(
                             "MainActivity",
-                            "green screen — requesting kf, not TCP tear",
+                            "green screen — requesting kf + codec rebuild in place",
                         )
                         session?.sendControl(mapOf("type" to "kf"))
                     } else {
@@ -428,11 +438,10 @@ class MainActivity : ComponentActivity() {
 
     private fun allowForcedReconnect(): Boolean {
         val now = System.currentTimeMillis()
-        if (isChromebook &&
-            !ChromebookRecoverPolicy.allowForceReconnect(paintedThisConnection)
-        ) {
-            return false
-        }
+        // Rate-limit TCP tears so we don't loop.
+        // Even after the first successful paint, ARC VDA can wedge and stay
+        // solid-green; in those severe cases we prefer a reconnect over
+        // leaving the panel stuck indefinitely.
         if (now - forcedReconnectsWindowStartMs > 30_000) {
             forcedReconnectsWindowStartMs = now
             forcedReconnectsWindow = 0
