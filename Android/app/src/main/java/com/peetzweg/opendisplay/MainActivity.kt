@@ -39,6 +39,7 @@ import com.peetzweg.opendisplay.settings.AppSettings
 import com.peetzweg.opendisplay.settings.ConnectionMode
 import com.peetzweg.opendisplay.sleep.HostSleepController
 import com.peetzweg.opendisplay.sleep.PanelBacklight
+import com.peetzweg.opendisplay.sleep.ScreenLockPolicy
 import com.peetzweg.opendisplay.ui.CursorController
 import com.peetzweg.opendisplay.ui.IdleScreen
 import com.peetzweg.opendisplay.ui.PerfOverlay
@@ -166,8 +167,7 @@ class MainActivity : ComponentActivity() {
     private val hostSleep = HostSleepController(
         // Sync flush so `sleeping`/`closing` reach the Mac before stop() tears
         // the socket — otherwise wake-reconnect never arms.
-        // sendControl = { session?.sendControlSync(it) },
-        sendControl = { session?.sendControl(it) },
+        sendControl = { session?.sendControlSync(it) },
         setBrightness = { value -> panelBacklight.set(value) },
         setKeepScreenOn = { keep ->
             if (keep) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -191,9 +191,22 @@ class MainActivity : ComponentActivity() {
     private val lockReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
+                // Always disconnect on screen-off — Chromebooks often have no
+                // Android keyguard (`isDeviceSecure == false`), so gating on
+                // lock previously left the Mac streaming into a dark panel for
+                // tens of minutes until the session looked frozen/unclickable.
                 Intent.ACTION_SCREEN_OFF -> {
+                    if (ScreenLockPolicy.shouldStopOnScreenOff()) {
+                        hostSleep.onDeviceWillLock()
+                    }
+                }
+                Intent.ACTION_SCREEN_ON -> {
                     val km = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-                    if (km?.isDeviceSecure == true) hostSleep.onDeviceWillLock()
+                    // Secure phones: wait for USER_PRESENT (unlock). Chromebook /
+                    // no lock: screen-on is enough to resume listening.
+                    if (ScreenLockPolicy.shouldResumeOnScreenOn(km?.isDeviceSecure == true)) {
+                        hostSleep.onDeviceUnlocked()
+                    }
                 }
                 Intent.ACTION_USER_PRESENT -> hostSleep.onDeviceUnlocked()
             }
@@ -212,7 +225,10 @@ class MainActivity : ComponentActivity() {
         showAnalytics = AppSettings.showAnalytics(this)
         connectionMode = AppSettings.connectionMode(this)
         if (!lockReceiverRegistered) {
-            val filter = IntentFilter(Intent.ACTION_SCREEN_OFF).apply { addAction(Intent.ACTION_USER_PRESENT) }
+            val filter = IntentFilter(Intent.ACTION_SCREEN_OFF).apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_USER_PRESENT)
+            }
             ContextCompat.registerReceiver(this, lockReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
             lockReceiverRegistered = true
         }
@@ -537,11 +553,14 @@ class MainActivity : ComponentActivity() {
                 pendingSyncFrame = null
                 cancelRecover()
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                // Mac parks the session after hostSleeping — keep the Chromebook
-                // backlight dimmed until reconnect or the user taps the blank panel.
-                if (isChromebook && !hostSleep.hostDisplayOff) {
-                    panelBacklight.set(null)
+                // Mac parks after hostSleeping then ends TCP. Clear the blank
+                // overlay so we don't look frozen/unclickable until a mystery tap;
+                // wake reconnect will paint again when the Mac is usable.
+                if (hostSleep.hostDisplayOff) {
+                    hostSleep.wake()
                 }
+                hostDisplayOff = false
+                panelBacklight.set(null)
                 applyImmersive()
                 perf = PerfStats()
             }
